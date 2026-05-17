@@ -133,6 +133,56 @@ The test suite verifies that:
 
 ---
 
+## Windows 11 + dual RTX 3090 startup flow
+
+This is the exact order to run on the trading box. It pins **all**
+inference to GPU #1 so the desktop and any TradingView windows stay on
+GPU #0.
+
+```powershell
+# 0) Open PowerShell in the project root
+cd C:\Trading\ai_fibo_vision_trader
+
+# 1) First-time setup (venv + torch CUDA 12.1 + deps + .env)
+powershell -ExecutionPolicy Bypass -File .\scripts\setup_windows.ps1
+
+# 2) Confirm both 3090s are seen and that GPU #1 is the one we pin to
+$env:CUDA_VISIBLE_DEVICES = "1"
+. .\.venv\Scripts\Activate.ps1
+python -m tools.gpu_check
+# Expected: cuda_available=true, device_count=1, devices[0].name contains "3090"
+# (count is 1 because CUDA_VISIBLE_DEVICES=1 hides card #0 from this process)
+
+# 3) Drop CUDA_VISIBLE_DEVICES temporarily to verify the host actually has TWO 3090s
+Remove-Item Env:CUDA_VISIBLE_DEVICES
+python -m tools.gpu_check
+# Expected: device_count=2, both devices named "NVIDIA GeForce RTX 3090"
+
+# 4) Edit config\capture.yaml so monitor_index / left / top / width / height
+#    cover the TradingView chart pane on the secondary monitor.
+
+# 5) Smoke-test the capture region — writes logs\capture_test.png
+$env:CUDA_VISIBLE_DEVICES = "1"
+python -m tools.capture_test
+# Open logs\capture_test.png and confirm it shows the chart area you want.
+
+# 6) Run the mock-mode guard tests
+.\scripts\test.ps1
+
+# 7) Start the API (uses CUDA_VISIBLE_DEVICES=1 internally)
+.\scripts\run.ps1
+# Then in another terminal:
+#   curl http://127.0.0.1:8765/health
+```
+
+> Why card #1? On a typical dual-3090 build the monitors are plugged
+> into card #0 and the Windows desktop compositor runs there. Pinning
+> CUDA workloads to card #1 keeps the YOLO detector off the display
+> path, so chart redraws and screen capture do not stall while
+> inference runs.
+
+---
+
 ## Going live (NOT enabled here)
 
 To add real trading later you would:

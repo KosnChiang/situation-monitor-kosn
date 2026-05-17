@@ -1,0 +1,23 @@
+# TradingView capture region.
+#
+# monitor_index follows mss numbering:
+#   0 = "all monitors stitched together"
+#   1 = primary monitor
+#   2 = second monitor (typical TradingView placement on dual-3090 rig)
+#
+# left/top/width/height are pixel offsets within that monitor. Leave them
+# as null to capture the whole monitor. Set them to crop down to just the
+# TradingView chart pane (recommended once you know the geometry).
+
+region:
+  monitor_index: 2
+  left: null
+  top: null
+  width: null
+  height: null
+
+# Capture cadence used by the live pipeline (frames per second).
+fps: 4
+
+# Output for the manual smoke test (tools/capture_test.py).
+output_path: logs/capture_test.png
