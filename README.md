@@ -221,8 +221,6 @@ in denial of them:
 
 ### What this scaffold gives you
 
-### What this scaffold gives you
-
 | File                                | Purpose                                                                 |
 | ----------------------------------- | ----------------------------------------------------------------------- |
 | `scripts/start_hermes.ps1`          | Pins `LIVE_TRADING=false`, `EXECUTION_MODE=mock`, `BROKER_MODE=mock`, `CUDA_VISIBLE_DEVICES=1`, refuses to flip them, refuses to launch until `HERMES_EXEC` is set, and refuses if any broker credential env (`SHIOAJI_API_KEY`, `IB_PASSWORD`, `MT5_LOGIN`, `BINANCE_API_KEY`, `ALPACA_API_KEY`, `CTPRO_USER` …) is in scope. |
