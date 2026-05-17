@@ -19,11 +19,17 @@ class FiboLineSegment:
     length: int                         # x_end - x_start, pixels
     color_bgr: tuple[int, int, int]     # median BGR colour along the line
     angle_deg: float                    # signed angle off horizontal
+    confidence: float = 0.0             # 0..1, length/image_width heuristic
 
     @property
     def color_hex(self) -> str:
         b, g, r = self.color_bgr
         return f"#{r:02X}{g:02X}{b:02X}"
+
+    @property
+    def color_rgb(self) -> tuple[int, int, int]:
+        b, g, r = self.color_bgr
+        return (r, g, b)
 
 
 @dataclass
@@ -112,6 +118,8 @@ def detect_fibo_lines(
         med = np.median(strip, axis=0)
         color_bgr = (int(med[0]), int(med[1]), int(med[2]))
 
+        confidence = float(min(1.0, length / max(1, w)))
+
         result.lines.append(
             FiboLineSegment(
                 y=y_avg,
@@ -120,6 +128,7 @@ def detect_fibo_lines(
                 length=length,
                 color_bgr=color_bgr,
                 angle_deg=float(np.mean([c[3] for c in cluster])),
+                confidence=confidence,
             )
         )
 
