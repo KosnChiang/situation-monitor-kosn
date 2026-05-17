@@ -5,6 +5,8 @@ __pycache__/
 .env
 logs/*.jsonl
 logs/*.log
+logs/*.png
+logs/*.jpg
 .pytest_cache/
 .idea/
 .vscode/
