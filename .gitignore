@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.env
+logs/*.jsonl
+logs/*.log
+.pytest_cache/
+.idea/
+.vscode/
+*.pt
+*.onnx
+models/
