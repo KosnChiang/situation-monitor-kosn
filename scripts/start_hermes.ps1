@@ -94,11 +94,24 @@ Write-Host "  OLLAMA_MODEL        = $($env:OLLAMA_MODEL)"
 Write-Host "  HERMES_ALLOWLIST    = $($env:HERMES_ALLOWLIST)"
 Write-Host ""
 
-# ----- 7. Launch Hermes (only if user has set HERMES_EXEC) -----
+# ----- 7. Launch Hermes -----
+# Resolution order for the entry point:
+#   1. $env:HERMES_EXEC explicitly set (in hermes.env or shell)  -> use that
+#   2. `hermes` command found on PATH                            -> use that
+#   3. Neither -> print configuration and exit 0 without running anything
 if (-not $env:HERMES_EXEC) {
-    Write-Host "HERMES_EXEC is not set. Nothing launched."
-    Write-Host "Set HERMES_EXEC in $EnvFile to the verified Hermes entry point,"
-    Write-Host "then re-run this script. See README -> 'Hermes integration'."
+    $cmd = Get-Command hermes -ErrorAction SilentlyContinue
+    if ($cmd) {
+        $env:HERMES_EXEC = $cmd.Source
+        Write-Host "Resolved hermes from PATH: $($env:HERMES_EXEC)"
+    }
+}
+
+if (-not $env:HERMES_EXEC) {
+    Write-Host "HERMES_EXEC is not set and 'hermes' is not on PATH. Nothing launched."
+    Write-Host "Install Hermes Agent first:"
+    Write-Host "  irm https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.ps1 | iex"
+    Write-Host "Then re-open PowerShell and re-run this script."
     exit 0
 }
 
@@ -107,4 +120,7 @@ if (-not (Test-Path $env:HERMES_EXEC)) {
 }
 
 Write-Host "Launching Hermes: $($env:HERMES_EXEC)"
-& $env:HERMES_EXEC --allowlist $env:HERMES_ALLOWLIST @args
+# Hermes Agent's documented CLI does not take an --allowlist flag; pass
+# the allowlist path through env only so a future system-prompt / config
+# step can pick it up. Forward any extra args from the caller.
+& $env:HERMES_EXEC @args

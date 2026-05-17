@@ -185,9 +185,41 @@ python -m tools.capture_test
 
 ## Hermes integration (safety scaffold only — no installer)
 
-This repo does **not** install Hermes. It only ships the safety
-envelope that any Hermes distribution must run inside on this box:
-a hard-mock launcher, a path allowlist, and a guard test suite.
+**Target Hermes**: [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent).
+The official installer is one PowerShell line — this repo only ships
+the safety envelope that runs around it: a hard-mock launcher, a path
+allowlist (project convention, see caveat below), and 11 guard tests.
+
+### Honest gaps between your spec and what Hermes Agent documents
+
+Before installing, read these. The scaffold is written around them, not
+in denial of them:
+
+1. **Install path.** Hermes Agent installs to `%LOCALAPPDATA%\hermes`,
+   not `C:\Trading\hermes`. The official installer does not take a
+   path flag. `scripts\start_hermes.ps1` therefore resolves the
+   `hermes` binary from `PATH` after install. If you want it physically
+   under `C:\Trading\hermes`, install first and then move/symlink
+   manually — but accept that future `hermes` self-updates may surprise
+   you.
+2. **Ollama.** Hermes Agent's documented providers are OpenRouter,
+   OpenAI, and "others"; the README does **not** mention Ollama or
+   `OLLAMA_BASE_URL` / `OLLAMA_MODEL`. The launcher still exports those
+   env vars in case a future Hermes provider picks them up, but you
+   should verify with `hermes model` and `hermes setup` whether
+   `qwen2.5:14b` via Ollama is actually selectable. If not, the usual
+   workaround is to put an OpenAI-compatible shim in front of Ollama
+   (Ollama already exposes `/v1` for this) and configure Hermes to talk
+   to that.
+3. **Path allowlist.** Hermes Agent has *interactive command approval*
+   and *container isolation*, but no documented YAML allowlist.
+   `configs/hermes_allowlist.yaml` in this repo is **project
+   convention**, not an OS sandbox. Hard restriction to four directories
+   needs OS-level enforcement on Windows (a restricted Windows user
+   account whose only writable folders are the four roots, plus
+   Hermes' own command-approval prompts).
+
+### What this scaffold gives you
 
 ### What this scaffold gives you
 
@@ -212,23 +244,33 @@ New-Item -ItemType Directory -Force -Path D:\TradingData    | Out-Null
 Copy-Item .\configs\hermes_allowlist.yaml C:\Trading\configs\hermes_allowlist.yaml
 Copy-Item .\configs\hermes.env.example    C:\Trading\configs\hermes.env
 
-# 3) Install Hermes itself MANUALLY into C:\Trading\hermes following
-#    its OWN README. This repo deliberately does not script that step,
-#    because the correct "Hermes" must be confirmed first.
+# 3) Install Hermes Agent (official one-liner; installs to %LOCALAPPDATA%\hermes
+#    and puts `hermes` on PATH).
+irm https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.ps1 | iex
 
-# 4) Open C:\Trading\configs\hermes.env and set HERMES_EXEC to the
-#    absolute path you just installed -- e.g.:
-#       HERMES_EXEC=C:\Trading\hermes\hermes.exe
-#    Do NOT edit LIVE_TRADING / EXECUTION_MODE / BROKER_MODE; the
-#    launcher will refuse to honour overrides anyway.
+# 4) Re-open PowerShell so PATH is refreshed, then verify:
+hermes --version
 
-# 5) Pull the Ollama model Hermes will talk to
+# 5) Leave HERMES_EXEC blank in C:\Trading\configs\hermes.env -- the
+#    launcher resolves `hermes` from PATH. Only set it if you have
+#    intentionally moved the binary to a custom location. Do NOT edit
+#    LIVE_TRADING / EXECUTION_MODE / BROKER_MODE; the launcher will
+#    refuse to honour overrides anyway.
+
+# 6) Pull the Ollama model you intend to use (assuming Hermes can talk
+#    to Ollama -- see gap #2 above; verify with `hermes model`).
 ollama pull qwen2.5:14b
 
-# 6) Run the safety tests BEFORE launching
+# 7) Run `hermes setup` and configure the provider. If Hermes does not
+#    list Ollama as a provider, point it at an OpenAI-compatible base
+#    URL of http://127.0.0.1:11434/v1 (Ollama's OpenAI-compatible
+#    endpoint) and set the model name to qwen2.5:14b.
+hermes setup
+
+# 8) Run the safety tests BEFORE launching
 .\scripts\test.ps1
 
-# 7) Launch Hermes through the safe wrapper
+# 9) Launch Hermes through the safe wrapper
 .\scripts\start_hermes.ps1
 ```
 

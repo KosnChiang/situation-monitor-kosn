@@ -1,11 +1,18 @@
 # ============================================================
 # Hermes path allowlist (Windows 11)
 #
-# Hermes is permitted to read / write / execute ONLY inside the paths
-# listed below. Everything outside these roots is denied by default.
+# IMPORTANT: Hermes Agent (NousResearch/hermes-agent) does NOT document
+# reading this file natively. It uses interactive "command approval"
+# instead. Treat this file as:
+#   * project-side documentation of intent,
+#   * input for a future system-prompt / wrapper that enforces it, AND
+#   * the source of truth our own safety tests check against.
+# Real OS-level path restriction must be configured separately on the
+# Windows host (e.g. a restricted user account whose only writable
+# directories are those listed below).
 #
-# Copy this file to C:\Trading\configs\hermes_allowlist.yaml on the
-# Windows box before running scripts\start_hermes.ps1.
+# Copy to C:\Trading\configs\hermes_allowlist.yaml on the Windows box
+# before running scripts\start_hermes.ps1.
 # ============================================================
 
 allowed_paths:
