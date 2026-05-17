@@ -183,6 +183,79 @@ python -m tools.capture_test
 
 ---
 
+## Hermes integration (safety scaffold only — no installer)
+
+This repo does **not** install Hermes. It only ships the safety
+envelope that any Hermes distribution must run inside on this box:
+a hard-mock launcher, a path allowlist, and a guard test suite.
+
+### What this scaffold gives you
+
+| File                                | Purpose                                                                 |
+| ----------------------------------- | ----------------------------------------------------------------------- |
+| `scripts/start_hermes.ps1`          | Pins `LIVE_TRADING=false`, `EXECUTION_MODE=mock`, `BROKER_MODE=mock`, `CUDA_VISIBLE_DEVICES=1`, refuses to flip them, refuses to launch until `HERMES_EXEC` is set, and refuses if any broker credential env (`SHIOAJI_API_KEY`, `IB_PASSWORD`, `MT5_LOGIN`, `BINANCE_API_KEY`, `ALPACA_API_KEY`, `CTPRO_USER` …) is in scope. |
+| `configs/hermes_allowlist.yaml`     | Whitelists exactly four paths: `C:\Trading\ai_fibo_vision_trader`, `C:\Trading\configs`, `C:\Trading\logs`, `D:\TradingData`. Denies `.env`, credentials, secrets, CTPro, broker SDK paths. Denies broker SDK commands. |
+| `configs/hermes.env.example`        | Env overlay template. `HERMES_EXEC=` is intentionally **blank**.        |
+| `tests/test_hermes_safety.py`       | Eleven tests that fail loudly if any of the above safety properties regress. |
+
+### Windows setup (after you decide which Hermes to use)
+
+```powershell
+# 1) Pull the latest scaffold
+cd C:\Trading\ai_fibo_vision_trader
+git pull
+
+# 2) Make the shared config directory and copy the scaffold there
+New-Item -ItemType Directory -Force -Path C:\Trading\configs | Out-Null
+New-Item -ItemType Directory -Force -Path C:\Trading\logs   | Out-Null
+New-Item -ItemType Directory -Force -Path D:\TradingData    | Out-Null
+Copy-Item .\configs\hermes_allowlist.yaml C:\Trading\configs\hermes_allowlist.yaml
+Copy-Item .\configs\hermes.env.example    C:\Trading\configs\hermes.env
+
+# 3) Install Hermes itself MANUALLY into C:\Trading\hermes following
+#    its OWN README. This repo deliberately does not script that step,
+#    because the correct "Hermes" must be confirmed first.
+
+# 4) Open C:\Trading\configs\hermes.env and set HERMES_EXEC to the
+#    absolute path you just installed -- e.g.:
+#       HERMES_EXEC=C:\Trading\hermes\hermes.exe
+#    Do NOT edit LIVE_TRADING / EXECUTION_MODE / BROKER_MODE; the
+#    launcher will refuse to honour overrides anyway.
+
+# 5) Pull the Ollama model Hermes will talk to
+ollama pull qwen2.5:14b
+
+# 6) Run the safety tests BEFORE launching
+.\scripts\test.ps1
+
+# 7) Launch Hermes through the safe wrapper
+.\scripts\start_hermes.ps1
+```
+
+### Safety properties enforced
+
+* Mock mode is set by the launcher and **cannot** be flipped by
+  `hermes.env` — those keys are explicitly stripped on read.
+* `HERMES_EXEC` blank ⇒ launcher prints the configuration and exits 0
+  without invoking anything. There is no "default" Hermes path.
+* No file in this scaffold imports or references a broker SDK
+  (`shioaji`, `ib_insync`, `ibapi`, `MetaTrader5`, `ccxt`, `binance`,
+  `alpaca`, `oandapyV20`) outside an explicit denial list.
+* No file references CTPro credentials or any broker token/password
+  variable as an *assignment*.
+* The allowlist is exactly the four approved roots — adding a fifth
+  fails `test_allowlist_contains_exactly_the_four_roots`.
+
+### What I did NOT do
+
+* Did **not** install Hermes — source unconfirmed.
+* Did **not** create `C:\Trading\hermes` — that's your manual step
+  once you've verified which Hermes distribution to use.
+* Did **not** add any broker SDK to `requirements.txt`.
+* Did **not** read, write, or reference any broker credential.
+
+---
+
 ## Going live (NOT enabled here)
 
 To add real trading later you would:

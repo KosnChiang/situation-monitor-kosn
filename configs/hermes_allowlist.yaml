@@ -1,0 +1,61 @@
+# ============================================================
+# Hermes path allowlist (Windows 11)
+#
+# Hermes is permitted to read / write / execute ONLY inside the paths
+# listed below. Everything outside these roots is denied by default.
+#
+# Copy this file to C:\Trading\configs\hermes_allowlist.yaml on the
+# Windows box before running scripts\start_hermes.ps1.
+# ============================================================
+
+allowed_paths:
+  - C:\Trading\ai_fibo_vision_trader
+  - C:\Trading\configs
+  - C:\Trading\logs
+  - D:\TradingData
+
+# Patterns Hermes must refuse even inside allowed_paths.
+# (Defence in depth -- the project itself contains no broker code,
+# but a future stray file should still be denied.)
+denied_globs:
+  - "**/.env"
+  - "**/.env.*"
+  - "**/credentials*"
+  - "**/secrets*"
+  - "**/id_rsa*"
+  - "**/*token*"
+  - "**/CTPro/**"
+  - "**/ctpro/**"
+  - "**/shioaji*"
+  - "**/ib_insync*"
+  - "**/MetaTrader5*"
+  - "**/mt5*"
+
+# Commands Hermes is allowed to invoke (anything else is denied).
+# Keep this list small and explicit.
+allowed_commands:
+  - python
+  - python -m pytest
+  - python -m tools.gpu_check
+  - python -m tools.capture_test
+  - python -m tools.detect_fibo_lines
+  - powershell -ExecutionPolicy Bypass -File scripts\test.ps1
+  - powershell -ExecutionPolicy Bypass -File scripts\run.ps1
+  - git status
+  - git diff
+  - git log
+
+# Hard refusals -- if Hermes ever tries any of these, abort.
+denied_commands:
+  - "*shioaji*"
+  - "*ib_insync*"
+  - "*ibapi*"
+  - "*MetaTrader5*"
+  - "*ccxt*"
+  - "*binance*"
+  - "*alpaca*"
+  - "*oandapyV20*"
+  - "*live_order*"
+  - "*place_order*"
+  - "*real_order*"
+  - "*CTPro*"
