@@ -201,3 +201,39 @@ def test_allowlist_does_not_include_unapproved_drives():
         assert drive in {"C:", "D:"}, f"allowed_paths contains unapproved drive: {p}"
         assert "broker" not in p.lower()
         assert "ctpro" not in p.lower()
+
+
+# ---------------------------------------------------------------- tool calling rule
+
+def test_system_prompt_forbids_fake_tool_call_json():
+    """The project system prompt must include the rule that Hermes invokes
+    real tools rather than printing a tool-call JSON envelope as text.
+
+    Added after the 2026-05-19 regression where the user-scope Hermes
+    `model.default` was downgraded to `qwen2.5-coder:7b-64k` and the model
+    started emitting `{"name":"terminal","arguments":{...}}` as plain text
+    instead of using the native tool-call channel. The prompt-side defence
+    is to instruct the model explicitly. See:
+      * prompts/hermes_project_system_prompt.md  Tool calling
+      * docs/hermes_operating_runbook.md  7.5
+      * scripts/hermes_tool_call_smoke.ps1
+    """
+    prompt = ROOT / "prompts" / "hermes_project_system_prompt.md"
+    assert prompt.exists(), f"missing system prompt: {prompt}"
+    txt = prompt.read_text(encoding="utf-8")
+
+    # Section heading must exist.
+    assert "Tool calling" in txt, "system prompt missing a 'Tool calling' section"
+
+    # The JSON envelope shape must be shown explicitly so the model knows
+    # exactly what NOT to emit.
+    assert '"name"' in txt and '"arguments"' in txt, (
+        "system prompt must spell out the JSON tool-envelope shape that is forbidden"
+    )
+
+    # And the fallback rule -- if no tool is available, plain prose, never
+    # fabricate -- must be present too.
+    lowered = txt.lower()
+    assert "never fabricate" in lowered or "never print" in lowered or "do not print" in lowered or "do not emit" in lowered, (
+        "system prompt must explicitly forbid printing/fabricating tool JSON as text"
+    )

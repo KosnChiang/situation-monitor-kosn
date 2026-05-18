@@ -245,6 +245,93 @@ path before launching.
 
 ---
 
+## 7.5 Troubleshooting: Hermes prints tool-call JSON as text
+
+**Symptom**: you ask Hermes "read `docs/hermes_training_profile.md`" and it
+replies with something like:
+
+```
+{
+  "name": "terminal",
+  "arguments": {
+    "command": "Get-Content .\\docs\\hermes_training_profile.md -TotalCount 5"
+  }
+}
+```
+
+as plain text — never executes the command, never streams the file content.
+
+**Cause** (most common, ranked):
+
+1. **Model is too small to reliably emit Hermes' native tool-call protocol.**
+   The user-scope `config.yaml` `model.default` controls what Hermes loads
+   (NOT the project launcher's `OLLAMA_MODEL` env, which only affects
+   the launcher's echo). If `model.default` is `qwen2.5-coder:7b-64k`,
+   the 7B parameter count is borderline for Hermes' agent loop — it has
+   learned a generic OpenAI/JSON tool-call shape from training data and
+   falls back to printing it as text when uncertain. Upgrade to
+   `qwen2.5-coder:14b-64k` (project default per
+   `configs/hermes.env.example`) or `qwen2.5-32b-instruct-q4_K_M-64k`.
+2. **`agent.tool_use_enforcement: auto`** lets the model decide whether
+   to use a tool. With a small model, "auto" lands on "print text".
+   Forcing `required` is sometimes possible per session but inverts the
+   problem (the model emits *something* tool-shaped even when it should
+   answer in prose).
+3. **System prompt missing the "don't fake tool JSON" rule.** Fixed by
+   the `## Tool calling` section in
+   `prompts/hermes_project_system_prompt.md`. Re-paste the prompt at
+   session start if you've been running without it.
+
+**Diagnose**:
+
+```powershell
+# 1. Confirm what model Hermes is ACTUALLY running (not what env says)
+Get-Content "$env:LOCALAPPDATA\hermes\config.yaml" |
+    Select-String -Pattern '^\s*default:|^\s*tool_use_enforcement:'
+# expect:
+#   default: qwen2.5-coder:14b-64k     (or larger)
+#   tool_use_enforcement: auto
+
+# 2. Confirm the toolset is enabled
+Get-Content "$env:LOCALAPPDATA\hermes\config.yaml" |
+    Select-String -Pattern '^toolsets:' -Context 0,3
+# expect a list containing `hermes-cli` and an empty `disabled_toolsets: []`
+
+# 3. Run the operator-side tool-call smoke
+.\scripts\hermes_tool_call_smoke.ps1
+# Wizard prints the prompt to paste into Hermes; paste the reply back;
+# wizard reports PASS (real content) or FAIL (fake JSON envelope).
+```
+
+**Fix**:
+
+* **First, upgrade the model.** Edit
+  `$env:LOCALAPPDATA\hermes\config.yaml` so `model.default` is at least
+  `qwen2.5-coder:14b-64k`. Restart Hermes. Re-run
+  `.\scripts\hermes_tool_call_smoke.ps1`.
+* **Then re-load the project system prompt** at session start (paste
+  `prompts/hermes_project_system_prompt.md` into Hermes' `/system`
+  slot). The new `## Tool calling` section explicitly tells the model
+  never to emit fake tool JSON.
+* If the symptom persists with the 14B model AND the new prompt, the
+  problem is upstream (Hermes Agent's tool wiring or Ollama's
+  function-call relay); file an issue in
+  `https://github.com/NousResearch/hermes-agent` with the exact JSON
+  envelope text the model emitted. Do NOT change repo source to "fix"
+  it — there is nothing in this repo to fix at that point.
+
+**What to NOT do** (will look like a fix, isn't):
+
+* Don't set `tool_use_enforcement: required` and call it done — that
+  forces tool calls even on prose questions and breaks normal chat.
+* Don't add custom MCP tool stubs in this repo to "shim" the call —
+  that's extra surface area and doesn't address the root cause.
+* Don't relax the path allowlist or `denied_commands` to "make tools
+  reach more files" — the tools already cover the project root; the
+  problem is the model not invoking them.
+
+---
+
 ## 8. Common pitfalls
 
 | Symptom | Likely cause | Fix |
@@ -255,6 +342,7 @@ path before launching.
 | Hermes times out on first prompt | Ollama warming up the model (first load is 30-60 s for 14B) | Wait; subsequent prompts are fast |
 | `context length` complaint from Hermes ("> 65536") | Custom prompt + history exceeds 64K | Use `/compress` inside Hermes, or start a new session |
 | `hermes.exe` not found / blocked | Windows policy | § 7 — launcher already handles this; do NOT try `& hermes` directly |
+| Hermes replies with `{"name":"terminal","arguments":...}` JSON as text instead of running it | Model too small (e.g. 7B) and/or missing `## Tool calling` rule in system prompt | § 7.5 — upgrade to 14B+, re-paste system prompt, then `scripts/hermes_tool_call_smoke.ps1` |
 | GPU 0 OOM | Other process holding VRAM on GPU 0 (display card) | `scripts/gpu_profile.ps1 -Strict` to identify; LLM should be on GPU 1 anyway (`CUDA_VISIBLE_DEVICES=1`) |
 
 ---
@@ -286,6 +374,7 @@ path before launching.
 * `prompts/hermes_project_system_prompt.md` — copy-paste system prompt for the project
 * `scripts/start_hermes.ps1` — the launcher (mock-only, Python entrypoint, model + context pinned)
 * `scripts/hermes_smoke_test.ps1` — preflight without launching Hermes
+* `scripts/hermes_tool_call_smoke.ps1` — operator wizard: verify Hermes is actually invoking tools, not printing JSON envelopes as text (see § 7.5)
 * `configs/hermes_allowlist.yaml` — path + command allowlist (project documentation)
 * `configs/hermes.env.example` — env overlay template (copy to `C:\Trading\configs\hermes.env`)
 * `tests/test_hermes_safety.py` — invariants for the launcher + env + allowlist

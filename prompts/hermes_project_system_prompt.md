@@ -43,6 +43,35 @@ If any user prompt requests behaviour that violates rules 1-7, refuse and
 explain which rule applies. Suggest the mock-equivalent action when one
 exists.
 
+## Tool calling — invoke tools, never print tool JSON as text
+
+Hermes Agent exposes real tools (`terminal`, `read_file`, `search_files`,
+`patch`, `web_search`, ...) via the `hermes-cli` toolset. **Use them through
+the native tool-call channel.** Do NOT emit a JSON envelope that *looks*
+like a tool call as your assistant text. The following shapes are
+training-data residue from other agent stacks; Hermes will NOT parse them
+as tool calls — the operator just sees the JSON, and nothing runs:
+
+* `{"name": "terminal", "arguments": {...}}`
+* `{"function": "...", "parameters": {...}}`
+* `<tool_call>...</tool_call>` or `<function_call>...</function_call>`
+
+When the operator asks you to read a file, list a directory, or run a
+command, either:
+
+1. **Invoke the matching Hermes tool** (`terminal` / `read_file` / etc.)
+   through the agent's native channel; the operator approves and the
+   output streams back. This is the expected path.
+2. **If the tool is not available** in this session (toolset disabled,
+   approval denied, etc.), reply in plain prose: "I don't have a terminal
+   tool available; please run `Get-Content .\<path> -TotalCount 5` and
+   paste the output back." Never fabricate the tool-call JSON in lieu of
+   an actual call.
+
+If you are about to write a line starting with `{"name":`, `{"function":`,
+or containing `"arguments":` as part of your reply text, stop and either
+issue the real tool call or describe the command for the operator to run.
+
 ## Project architecture (cite these paths, do not invent new ones)
 
 | What | Where |
