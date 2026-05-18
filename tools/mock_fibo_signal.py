@@ -46,6 +46,7 @@ from typing import Optional
 DEFAULT_FIBO_PATH = "logs/fibo_lines.json"
 DEFAULT_SIGNALS_PATH = "logs/signals.jsonl"
 DEFAULT_QUOTES_PATH = "logs/quotes.jsonl"
+DEFAULT_CALIBRATION_PATH = "config/capture.yaml"
 
 
 def _now() -> tuple[float, str]:
@@ -188,6 +189,10 @@ def main() -> int:
     )
     ap.add_argument("--quotes-file", default=DEFAULT_QUOTES_PATH,
                     help="JSONL file produced by tools.quote_feed (latest_quote mode only)")
+    ap.add_argument("--calibration-config", default=DEFAULT_CALIBRATION_PATH,
+                    help="YAML file with a top-level 'calibration:' block "
+                         "(latest_quote mode only). If absent or no block, falls back "
+                         "to raw price-as-pixel-y interpretation.")
     ap.add_argument("--tolerance-px", type=int, default=8)
     ap.add_argument("--min-confidence", type=float, default=0.55)
     ap.add_argument("--json", action="store_true", help="emit JSON to stdout instead of summary text")
@@ -298,9 +303,30 @@ def _resolve_price_y(args) -> tuple[Optional[float], str]:
             return None, f"latest_quote: last line not JSON: {exc}"
         if not isinstance(quote, dict) or "last" not in quote:
             return None, "latest_quote: last record missing 'last' field"
-        return float(quote["last"]), (
-            f"latest_quote {path}: last={quote['last']} "
-            f"symbol={quote.get('symbol')} ts={quote.get('timestamp')}"
+
+        last_price = float(quote["last"])
+        cal_path = Path(args.calibration_config)
+        cal_note = ""
+        price_y = last_price
+        if cal_path.exists():
+            from vision.chart_calibration import ChartCalibration, CalibrationError
+            try:
+                cal = ChartCalibration.from_yaml(cal_path)
+            except CalibrationError as exc:
+                return None, f"latest_quote: calibration in {cal_path} is invalid: {exc}"
+            if cal is not None:
+                price_y = cal.price_to_pixel_y(last_price)
+                cal_note = (
+                    f" via calibration (price {last_price} -> pixel_y {price_y:.1f})"
+                )
+            else:
+                cal_note = f" without calibration (no 'calibration:' block in {cal_path})"
+        else:
+            cal_note = f" without calibration ({cal_path} not found)"
+
+        return price_y, (
+            f"latest_quote {path}: last={last_price} "
+            f"symbol={quote.get('symbol')} ts={quote.get('timestamp')}{cal_note}"
         )
 
     print(f"FAIL: unknown --price-source: {args.price_source}", file=sys.stderr)

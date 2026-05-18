@@ -21,3 +21,40 @@ fps: 4
 
 # Output for the manual smoke test (tools/capture_test.py).
 output_path: logs/capture_test.png
+
+# Phase-5.A: chart calibration.
+#
+# Two-point linear mapping between pixel-y (row index in the captured
+# image) and price (in the instrument's price units, e.g. USD/oz for
+# gold). When this block is present, `tools.mock_fibo_signal
+# --price-source latest_quote` converts each quote's `last` field into
+# pixel-y via this transform before comparing against the detected
+# Fibo lines. When absent, the signal generator falls back to raw
+# price-as-pixel-y (Phase-5 behaviour; only useful for tests).
+#
+# How to fill this in:
+#   1. Capture one screenshot:  python -m tools.capture_test
+#   2. Open logs/capture_test.png. Pick two price labels that span most
+#      of the chart vertically -- one near the top, one near the bottom.
+#   3. Note each label's price and pixel-y (row index from the top).
+#   4. Render a verification overlay:
+#        python -m tools.calibrate_chart \
+#          --pixel-y-high 60  --price-high 2450 \
+#          --pixel-y-low  420 --price-low  2350 \
+#          --input  logs/capture_test.png \
+#          --output logs/calibration_debug.png \
+#          --tick   10
+#      Open the debug PNG; the green tick ladder should land on the
+#      chart's own price grid. Iterate until it does.
+#   5. Uncomment the block below and replace the four numbers with the
+#      values that produced the matching overlay.
+#   6. Recalibrate whenever you change the capture region or the
+#      chart's vertical zoom in TradingView.
+#
+# calibration:
+#   reference_high:
+#     pixel_y: 60        # row near the top of the chart
+#     price: 2450.0      # price label at that row
+#   reference_low:
+#     pixel_y: 420       # row near the bottom of the chart
+#     price: 2350.0      # price label at that row
