@@ -16,12 +16,17 @@
 #   * Pre-flight refuses to run unless LIVE_TRADING / EXECUTION_MODE /
 #     BROKER_MODE are the mock-only values.
 #   * Does NOT pass --yolo or --accept-hooks to hermes.
-#   * Uses `hermes -z` (one-shot) which auto-bypasses *interactive
+#   * Uses `-z` (one-shot) which auto-bypasses *interactive
 #     approvals* so the pipe does not hang -- this is NOT the same as
 #     --yolo. The prompt itself is scoped to reading AGENTS.md from
 #     the project root.
 #   * Touches no broker SDK, no broker credential, no TradingView
 #     session, no live order path.
+#   * Launches Hermes via its venv Python entrypoint
+#     (`hermes_cli.main`), NOT via `hermes.exe`, because Windows
+#     AppLocker / WDAC can silently block the .exe. Same approach as
+#     scripts/start_hermes.ps1 (see docs/hermes_operating_runbook.md
+#     section 7).
 # ============================================================
 
 $ErrorActionPreference = "Stop"
@@ -40,11 +45,20 @@ foreach ($p in @(
 }
 Write-Host "[OK] mock-only envelope clean"
 
-if (-not (Get-Command hermes -ErrorAction SilentlyContinue)) {
-    Write-Host "ABORT: hermes not on PATH" -ForegroundColor Red
+# Resolve Hermes entrypoint via the venv Python (NOT hermes.exe).
+# Windows AppLocker / WDAC can silently block the .exe even when on PATH;
+# scripts/start_hermes.ps1 sets $env:HERMES_PY for the same reason.
+$hermesPy = $env:HERMES_PY
+if (-not $hermesPy) {
+    $hermesPy = Join-Path $env:LOCALAPPDATA "hermes\hermes-agent\venv\Scripts\python.exe"
+}
+if (-not (Test-Path $hermesPy)) {
+    Write-Host "ABORT: Hermes venv python not found: $hermesPy" -ForegroundColor Red
+    Write-Host "       Run .\scripts\start_hermes.ps1 in another shell first to verify the install," -ForegroundColor Red
+    Write-Host "       or set `$env:HERMES_PY to the correct venv python.exe path." -ForegroundColor Red
     exit 2
 }
-Write-Host "[OK] hermes on PATH"
+Write-Host "[OK] hermes venv python: $hermesPy"
 
 $projectRoot = if ($PSScriptRoot) { Split-Path $PSScriptRoot -Parent } else { (Get-Location).Path }
 Set-Location $projectRoot
@@ -76,15 +90,16 @@ nothing else. Do NOT emit any JSON, do NOT write the tool call payload
 in your response body, do NOT wrap your answer in code fences.
 '@
 
-Write-Host "========== sending smoke prompt to hermes -z =========="
+Write-Host "========== sending smoke prompt to hermes (-z, via venv python) =========="
 Write-Host $prompt
-Write-Host "========================================================"
+Write-Host "========================================================================="
 Write-Host ""
 
 $tmpOut = New-TemporaryFile
 $tmpErr = New-TemporaryFile
-$p = Start-Process -FilePath (Get-Command hermes).Source `
-    -ArgumentList @("-z", $prompt) `
+$entrypoint = "from hermes_cli.main import main; raise SystemExit(main())"
+$p = Start-Process -FilePath $hermesPy `
+    -ArgumentList @("-c", $entrypoint, "-z", $prompt) `
     -NoNewWindow -PassThru `
     -RedirectStandardOutput $tmpOut `
     -RedirectStandardError  $tmpErr

@@ -23,9 +23,13 @@ contributor to the JSON-as-text failure mode documented in §2.
 Hermes is the **dialogue + planning + tool-orchestration** layer for
 the AI Fibo Vision Trader. Concretely, on this host Hermes:
 
-* talks to a local Ollama instance at `http://127.0.0.1:11434/v1`
-  using the `qwen2.5-32b-instruct-q4_K_M-64k` tag built by
-  `scripts/fix_hermes_64k.ps1`;
+* talks to a local Ollama instance at `http://127.0.0.1:11434/v1`.
+  The **inference (chat) model** is `qwen2.5-coder:14b-64k` (set in
+  `$env:LOCALAPPDATA\hermes\config.yaml` `model.default`, pinned by
+  `configs/hermes.env.example`). The **compression model** is
+  `qwen2.5-32b-instruct-q4_K_M-64k` (built by
+  `scripts/fix_hermes_64k.ps1`), retained as a fallback in
+  `auxiliary.compression.model` and `custom_providers[Local]`;
 * reads project files via its file tool;
 * runs shell commands via its terminal tool (subject to
   `configs/hermes_allowlist.yaml`);
@@ -71,19 +75,24 @@ In all three the tool **was not actually executed**. The conversation
 proceeds as if the agent had read the file, but no read happened, so
 any follow-up referring to "what the file says" is a hallucination.
 
-### 2.2 Why it happens with Qwen2.5-32B-Instruct on Ollama
+### 2.2 Why it happens with the Qwen2.5 family on Ollama
 
-Three factors usually combine:
+Three factors usually combine. The symptom has been observed on
+`qwen2.5-coder:7b-64k` (most aggressive), `qwen2.5-coder:14b-64k`
+(intermittent), and `qwen2.5-32b-instruct-q4_K_M-64k` (intermittent).
+The current project default is `qwen2.5-coder:14b-64k`; smaller tags
+make the failure mode more frequent, not different in kind.
 
-1. **Qwen2.5-32B-Instruct** is fine-tuned for a Qwen-specific function
+1. **Qwen2.5 chat / coder fine-tunes** target a Qwen-specific function
    calling format (`<|im_start|>...<|im_end|>` blocks with a tool
-   listing in the system prompt), not for OpenAI-style `tool_calls`
+   listing in the system prompt), not the OpenAI-style `tool_calls`
    that Hermes sends through Ollama's OpenAI bridge.
 2. **Ollama's OpenAI-compatibility layer** translates OpenAI
    `tools=[...]` into a prompt-template instruction. With models that
    were not heavily trained on that exact template, the model emits
    the tool-call payload as content text rather than into the
-   structured `tool_calls` channel.
+   structured `tool_calls` channel. The smaller the model, the more
+   often this falls through.
 3. The **target file did not exist**. When asked to read a missing
    file, an under-trained-for-tools model often falls back to
    "describe what I would have done" instead of actually attempting
@@ -91,12 +100,16 @@ Three factors usually combine:
 
 ### 2.3 Why we documented it instead of silently swapping models
 
-The 32B compression model decision sits in `scripts/fix_hermes_64k.ps1`
-and the operator's chosen tag. Quietly swapping the inference model
-to fix tool-calling would also affect compression quality, GPU
-residency (currently the model is CPU-resident — see operator
-runbook §8) and VRAM budgeting. That's a deliberate operator
-decision, not an agent fix.
+The inference and compression model decisions live in
+`$env:LOCALAPPDATA\hermes\config.yaml` (operator-owned) and
+`scripts/fix_hermes_64k.ps1` (compression-tag build recipe).
+Quietly swapping models to fix tool-calling would also affect
+compression quality, GPU residency, and VRAM budgeting — those are
+deliberate operator decisions, not an agent fix. The 2026-05-19
+revert from `qwen2.5-coder:7b-64k` back to `qwen2.5-coder:14b-64k`
+was done by the operator after `scripts/hermes_tool_call_smoke.ps1`
+flagged the 7B regression; see `docs/hermes_operating_runbook.md`
+section 7.5.
 
 ---
 
