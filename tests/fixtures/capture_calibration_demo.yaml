@@ -1,0 +1,30 @@
+# Synthetic Phase-5.C calibration fixture.
+#
+# NOT a real TradingView calibration. Designed so that the linear
+# pixel-y <-> price mapping has a clean slope and hits the real Fibo
+# line in tests/fixtures/fibo_lines_18.json at y=1533 with a round
+# price, so tests can assert exact LONG / FLAT outcomes without
+# floating-point fuzz.
+#
+# Math:
+#   slope = (price_low - price_high) / (pixel_y_low - pixel_y_high)
+#         = (2200 - 2400) / (2033 - 33) = -0.1 price units per pixel
+#   pixel_y_to_price(y) = 2400 + (y - 33) * -0.1
+#
+# Key landmarks:
+#   pixel_y     33 <-> price 2400.0   (reference_high)
+#   pixel_y    533 <-> price 2350.0
+#   pixel_y   1033 <-> price 2300.0
+#   pixel_y   1533 <-> price 2250.0   (lines up with filtered Fibo y=1533)
+#   pixel_y   2033 <-> price 2200.0   (reference_low)
+#
+# Used by tests/test_phase5c_latest_quote_pipeline.py only. Never copied
+# into config/capture.yaml; the operator must derive real calibration
+# values from a real TradingView screenshot for production use.
+calibration:
+  reference_high:
+    pixel_y: 33
+    price: 2400.0
+  reference_low:
+    pixel_y: 2033
+    price: 2200.0
