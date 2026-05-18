@@ -1,0 +1,27 @@
+# Synthetic Phase-5.D calibration fixture for tests/test_watch_fibo_loop.py.
+#
+# NOT a real TradingView calibration. Designed for 800x480 synthetic
+# charts whose green Material line is at y=240. Slope is exactly
+# -0.5 price/pixel, so a quote with last=2300.0 maps to pixel_y=240
+# exactly, making LONG / FLAT / dedupe outcomes deterministic without
+# floating-point fuzz.
+#
+# Math:
+#   slope = (price_low - price_high) / (pixel_y_low - pixel_y_high)
+#         = (2200.0 - 2400.0) / (440 - 40) = -0.5 price/pixel
+#
+# Key landmarks:
+#   pixel_y  40 <-> price 2400.0   (reference_high)
+#   pixel_y 240 <-> price 2300.0   (synthetic chart's Fibo line)
+#   pixel_y 440 <-> price 2200.0   (reference_low)
+#
+# Never copy this block into config/capture.yaml -- it has nothing to
+# do with the real TradingView chart geometry. test_no_live_trading_phase5d
+# guards against accidental promotion of either demo fixture.
+calibration:
+  reference_high:
+    pixel_y: 40
+    price: 2400.0
+  reference_low:
+    pixel_y: 440
+    price: 2200.0

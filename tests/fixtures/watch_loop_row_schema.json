@@ -1,0 +1,17 @@
+{
+  "comment": "Required top-level keys in each row of logs/watch_loop.jsonl. Consumed by tests/test_watch_fibo_loop.py::test_row_has_required_top_level_keys. Keep in lockstep with WatchLoopRunner.run_one_iteration in tools/watch_fibo_loop.py.",
+  "required_top_level_keys": [
+    "iter",
+    "ts",
+    "timestamp",
+    "capture",
+    "detect",
+    "filter",
+    "quote",
+    "calibration",
+    "signal",
+    "dedupe",
+    "execution",
+    "notify"
+  ]
+}
