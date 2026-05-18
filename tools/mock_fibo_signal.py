@@ -1,22 +1,35 @@
-"""Generate mock trading signals from detected Fibo lines + a mock price.
+"""Generate mock trading signals from detected Fibo lines + a price source.
 
 Reads ``logs/fibo_lines.json`` (produced by ``tools.detect_fibo_lines``),
-takes a mock price expressed in image y-pixel space (same coordinate
+takes a price expressed in image y-pixel space (same coordinate
 system as the lines), and emits a JSON signal record. If
 ``--submit`` is set and the signal is not FLAT, the signal is also
 piped through ``risk.risk_gate.RiskGate`` and ``executor.mock_executor.MockExecutor``
 so the trade log mirrors what the live pipeline would record.
 
+Two price sources, selected by ``--price-source``:
+
+  * ``mock_y`` (default): use ``--price-y`` directly. Keeps the
+    Phase-5 unit tests deterministic.
+  * ``latest_quote``: tail the last record from ``--quotes-file``
+    (default ``logs/quotes.jsonl``, written by ``tools.quote_feed``
+    in its own process), take its ``last`` field as the y-pixel
+    price. If the file is missing or empty, emit FLAT. This is the
+    Phase-5.5 wiring step; price-to-pixel calibration is a follow-up.
+
 Strictly mock-only:
   * imports only stdlib + this repo's modules; no network library;
   * never reads or sends a broker credential;
+  * never imports anything from ``quote.*`` -- the file-based JSONL
+    contract is the only IPC channel, so the quote feed runs in its
+    own process and this side cannot accidentally spawn one in-process;
   * MockExecutor's own boundary check refuses to write to
     ``logs/trades.jsonl`` unless ``LIVE_TRADING=false`` and
     ``EXECUTION_MODE=mock``.
 
 Run:
     python -m tools.mock_fibo_signal --price-y 450 --symbol XAUUSD
-    python -m tools.mock_fibo_signal --price-y 450 --tolerance-px 8 --submit
+    python -m tools.mock_fibo_signal --price-source latest_quote --symbol XAUUSD --submit
 """
 from __future__ import annotations
 
@@ -32,6 +45,7 @@ from typing import Optional
 
 DEFAULT_FIBO_PATH = "logs/fibo_lines.json"
 DEFAULT_SIGNALS_PATH = "logs/signals.jsonl"
+DEFAULT_QUOTES_PATH = "logs/quotes.jsonl"
 
 
 def _now() -> tuple[float, str]:
@@ -163,9 +177,17 @@ def main() -> int:
     ap.add_argument(
         "--price-y",
         type=float,
-        required=True,
-        help="mock price expressed in image y-pixel space (same units as the detected lines)",
+        default=None,
+        help="price expressed in image y-pixel space; required when --price-source=mock_y",
     )
+    ap.add_argument(
+        "--price-source",
+        default="mock_y",
+        choices=("mock_y", "latest_quote"),
+        help="mock_y: use --price-y directly. latest_quote: tail --quotes-file.",
+    )
+    ap.add_argument("--quotes-file", default=DEFAULT_QUOTES_PATH,
+                    help="JSONL file produced by tools.quote_feed (latest_quote mode only)")
     ap.add_argument("--tolerance-px", type=int, default=8)
     ap.add_argument("--min-confidence", type=float, default=0.55)
     ap.add_argument("--json", action="store_true", help="emit JSON to stdout instead of summary text")
@@ -190,28 +212,54 @@ def main() -> int:
 
     lines = data.get("lines", []) if isinstance(data, dict) else []
 
+    price_y, price_note = _resolve_price_y(args)
+    out_signals = Path(args.out_signals)
+
+    if price_y is None:
+        # No price available (latest_quote mode with missing/empty file) ->
+        # emit FLAT and exit cleanly without touching the executor.
+        signal = _signal_record(
+            symbol=args.symbol,
+            side="FLAT",
+            reason=f"no price available ({price_note})",
+            fibo_line_y=None,
+            confidence=0.0,
+        )
+        _append_signal(signal, out_signals)
+        if args.json:
+            print(json.dumps({"signal": signal, "fill": None, "price_source": price_note}, ensure_ascii=False))
+        else:
+            print(f"signal: FLAT   symbol={args.symbol}  (no price)")
+            print(f"reason: {signal['reason']}")
+            print(f"wrote   -> {out_signals}")
+        return 0
+
     signal = generate_signal(
         fibo_lines=lines,
-        price_y=args.price_y,
+        price_y=price_y,
         symbol=args.symbol,
         tolerance_px=args.tolerance_px,
         min_confidence=args.min_confidence,
     )
 
-    out_signals = Path(args.out_signals)
     _append_signal(signal, out_signals)
 
     fill = None
     if args.submit:
-        fill = _submit_through_executor(signal, args.price_y)
+        fill = _submit_through_executor(signal, price_y)
 
     if args.json:
-        print(json.dumps({"signal": signal, "fill": fill}, ensure_ascii=False))
+        print(json.dumps(
+            {"signal": signal, "fill": fill, "price_source": price_note},
+            ensure_ascii=False,
+        ))
     else:
         print(
             f"signal: {signal['side']:5}  symbol={signal['symbol']}  "
-            f"fibo_y={signal['fibo_line_y']}  conf={signal['confidence']:.2f}"
+            f"fibo_y={signal['fibo_line_y']}  conf={signal['confidence']:.2f}  "
+            f"price_y={price_y}"
         )
+        print(f"price : {price_note}")
         print(f"reason: {signal['reason']}")
         print(f"wrote   -> {out_signals}")
         if fill and fill.get("submitted"):
@@ -221,6 +269,42 @@ def main() -> int:
         elif args.submit:
             print("not submitted: signal is FLAT")
     return 0
+
+
+def _resolve_price_y(args) -> tuple[Optional[float], str]:
+    """Return (price_y, source_note). price_y=None means "no price -> FLAT"."""
+    if args.price_source == "mock_y":
+        if args.price_y is None:
+            print(
+                "FAIL: --price-y is required when --price-source=mock_y",
+                file=sys.stderr,
+            )
+            raise SystemExit(4)
+        return float(args.price_y), f"mock_y={args.price_y}"
+
+    if args.price_source == "latest_quote":
+        path = Path(args.quotes_file)
+        if not path.exists():
+            return None, f"latest_quote: file {path} does not exist"
+        try:
+            rows = [r for r in path.read_text(encoding="utf-8").splitlines() if r.strip()]
+        except OSError as exc:
+            return None, f"latest_quote: cannot read {path}: {exc}"
+        if not rows:
+            return None, f"latest_quote: {path} is empty"
+        try:
+            quote = json.loads(rows[-1])
+        except json.JSONDecodeError as exc:
+            return None, f"latest_quote: last line not JSON: {exc}"
+        if not isinstance(quote, dict) or "last" not in quote:
+            return None, "latest_quote: last record missing 'last' field"
+        return float(quote["last"]), (
+            f"latest_quote {path}: last={quote['last']} "
+            f"symbol={quote.get('symbol')} ts={quote.get('timestamp')}"
+        )
+
+    print(f"FAIL: unknown --price-source: {args.price_source}", file=sys.stderr)
+    raise SystemExit(5)
 
 
 if __name__ == "__main__":

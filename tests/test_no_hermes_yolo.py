@@ -37,7 +37,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 PROD_DIRS = [
     "app", "capture", "vision", "strategy", "risk",
-    "executor", "notify", "scripts", "configs",
+    "executor", "notify", "scripts", "configs", "quote",
 ]
 
 SCAN_EXTS = {

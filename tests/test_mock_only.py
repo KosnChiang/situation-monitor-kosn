@@ -22,7 +22,7 @@ os.environ["EXECUTION_MODE"] = "mock"
 os.environ["TRADES_LOG"] = str(ROOT / "logs" / "trades.test.jsonl")
 
 
-PROJECT_DIRS = ["app", "capture", "vision", "strategy", "risk", "executor", "notify"]
+PROJECT_DIRS = ["app", "capture", "vision", "strategy", "risk", "executor", "notify", "quote"]
 
 FORBIDDEN_IMPORTS = [
     # Real-money broker / exchange SDKs.
