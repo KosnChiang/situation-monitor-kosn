@@ -132,6 +132,44 @@ def _append_signal(signal: dict, out_path: Path) -> None:
         f.write(json.dumps(signal, ensure_ascii=False) + "\n")
 
 
+def generate_signal_via_strategy(
+    *,
+    fibo_lines: list[dict],
+    image_shape: tuple[int, int],
+    price_y: float,
+    symbol: str,
+    min_confidence: float,
+) -> dict:
+    """Phase-6 path: namer + FiboMobV2.evaluate() instead of nearest-touch.
+
+    Bridges the CV-detected ``FiboLineSegment`` list to a
+    ``FiboDetection`` with named levels (via
+    ``vision.fibo_line_level_namer.name_levels``), then routes the
+    decision through ``strategy.fibo_mob_v2.FiboMobV2``. Pure function;
+    no I/O. The Phase-5 ``generate_signal()`` above is preserved as a
+    second strategy choice and remains the default for backward compat.
+    """
+    from vision.fibo_line_level_namer import name_levels
+    from strategy.fibo_mob_v2 import FiboMobV2
+
+    detection = name_levels(fibo_lines, image_shape=image_shape)
+    strat = FiboMobV2(min_confidence=min_confidence)
+    decision = strat.evaluate(detection, last_price=price_y)
+
+    nearest_y: Optional[int] = None
+    if detection.ok and detection.levels:
+        nearest = min(detection.levels, key=lambda lv: abs(lv.y_pixel - price_y))
+        nearest_y = int(nearest.y_pixel)
+
+    return _signal_record(
+        symbol=symbol,
+        side=decision.side,
+        reason=f"fibo-mob-v2: {decision.reason}",
+        fibo_line_y=nearest_y,
+        confidence=float(decision.confidence),
+    )
+
+
 def _submit_through_executor(signal: dict, price_y: float) -> Optional[dict]:
     """Pipe an approved non-FLAT signal through RiskGate + MockExecutor.
 
@@ -170,6 +208,41 @@ def _submit_through_executor(signal: dict, price_y: float) -> Optional[dict]:
     }
 
 
+def _notify_telegram(signal: dict, fill: Optional[dict], suppressed: bool) -> Optional[dict]:
+    """Dry-run-safe Telegram notification after submit. Never raises.
+
+    Default behaviour:
+      * if ``suppressed`` is True (operator passed ``--no-telegram``): skip.
+      * if the signal is FLAT or the fill was rejected: skip.
+      * else call ``notify.telegram_bot.TelegramBot().send(...)``.
+        - If ``TELEGRAM_DRY_RUN=1`` is set, the bot prints
+          "would send" and returns ``dry_run=True`` without networking.
+        - If credentials are absent, the bot returns ``skipped=True``.
+        - If credentials are present and dry-run is off, the bot
+          posts to Telegram (the operator's decision, not ours).
+
+    Returns the bot's response dict, or None when skipped.
+    """
+    if suppressed:
+        return None
+    if signal["side"] == "FLAT":
+        return None
+    if fill is None or not fill.get("submitted"):
+        return None
+
+    try:
+        from notify.telegram_bot import TelegramBot
+        text = (
+            f"[mock] {signal['symbol']} {signal['side']} "
+            f"conf={signal['confidence']:.2f} entry={fill.get('entry')} "
+            f"stop={fill.get('stop')} target={fill.get('target')} "
+            f"reason={signal['reason']}"
+        )
+        return TelegramBot().send(text)
+    except Exception as exc:
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--fibo-lines", default=DEFAULT_FIBO_PATH)
@@ -201,6 +274,21 @@ def main() -> int:
         action="store_true",
         help="pipe an approved non-FLAT signal through RiskGate + MockExecutor "
              "so a row lands in logs/trades.jsonl",
+    )
+    ap.add_argument(
+        "--strategy",
+        default="touch",
+        choices=("touch", "mob_v2"),
+        help="touch: Phase-5 nearest-line LONG/FLAT (default; backward compat). "
+             "mob_v2: Phase-6 wiring through vision.fibo_line_level_namer + "
+             "strategy.fibo_mob_v2.FiboMobV2.evaluate().",
+    )
+    ap.add_argument(
+        "--no-telegram",
+        action="store_true",
+        help="suppress the post-submit Telegram notification. By default a "
+             "notification is built but the bot stays in dry-run unless "
+             "TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID are set in env.",
     )
     args = ap.parse_args()
 
@@ -239,36 +327,62 @@ def main() -> int:
             print(f"wrote   -> {out_signals}")
         return 0
 
-    signal = generate_signal(
-        fibo_lines=lines,
-        price_y=price_y,
-        symbol=args.symbol,
-        tolerance_px=args.tolerance_px,
-        min_confidence=args.min_confidence,
-    )
+    if args.strategy == "mob_v2":
+        image_shape = (0, 0)
+        if isinstance(data, dict):
+            raw_shape = data.get("image_shape")
+            if isinstance(raw_shape, (list, tuple)) and len(raw_shape) >= 2:
+                image_shape = (int(raw_shape[0]), int(raw_shape[1]))
+        signal = generate_signal_via_strategy(
+            fibo_lines=lines,
+            image_shape=image_shape,
+            price_y=price_y,
+            symbol=args.symbol,
+            min_confidence=args.min_confidence,
+        )
+    else:
+        signal = generate_signal(
+            fibo_lines=lines,
+            price_y=price_y,
+            symbol=args.symbol,
+            tolerance_px=args.tolerance_px,
+            min_confidence=args.min_confidence,
+        )
 
     _append_signal(signal, out_signals)
 
     fill = None
+    notify = None
     if args.submit:
         fill = _submit_through_executor(signal, price_y)
+        notify = _notify_telegram(signal, fill, suppressed=args.no_telegram)
 
     if args.json:
         print(json.dumps(
-            {"signal": signal, "fill": fill, "price_source": price_note},
+            {"signal": signal, "fill": fill, "notify": notify,
+             "strategy": args.strategy, "price_source": price_note},
             ensure_ascii=False,
         ))
     else:
         print(
             f"signal: {signal['side']:5}  symbol={signal['symbol']}  "
             f"fibo_y={signal['fibo_line_y']}  conf={signal['confidence']:.2f}  "
-            f"price_y={price_y}"
+            f"price_y={price_y}  strategy={args.strategy}"
         )
         print(f"price : {price_note}")
         print(f"reason: {signal['reason']}")
         print(f"wrote   -> {out_signals}")
         if fill and fill.get("submitted"):
             print(f"submitted via MockExecutor -> logs/trades.jsonl (mode={fill['mode']})")
+            if notify is not None:
+                if notify.get("dry_run"):
+                    print(f"telegram: dry-run (would send)")
+                elif notify.get("skipped"):
+                    print(f"telegram: skipped ({notify.get('reason', 'disabled')})")
+                elif notify.get("ok"):
+                    print(f"telegram: sent (status={notify.get('status')})")
+                else:
+                    print(f"telegram: failed ({notify.get('error', notify)})")
         elif fill is not None:
             print(f"not submitted: {fill.get('reason', 'rejected by risk gate')}")
         elif args.submit:

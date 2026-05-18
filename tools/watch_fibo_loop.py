@@ -46,7 +46,7 @@ from typing import Optional
 from vision.chart_calibration import CalibrationError, ChartCalibration
 from vision.fibo_line_detector import detect_fibo_lines
 from vision.fibo_line_filter import FilterParams, filter_fibo_lines
-from tools.mock_fibo_signal import generate_signal
+from tools.mock_fibo_signal import generate_signal, generate_signal_via_strategy
 
 
 @dataclass(frozen=True)
@@ -67,6 +67,7 @@ class WatchLoopConfig:
     dedupe_from_trades_log: bool = False
     notify_mode: str = "off"          # off | dry | live
     symbol: str = "MOCK"
+    strategy: str = "touch"           # touch | mob_v2
 
 
 def _refuse_if_live() -> None:
@@ -273,13 +274,26 @@ class WatchLoopRunner:
         elif pixel_y is None:
             reason = "no pixel_y available"
         else:
-            sig = generate_signal(
-                fibo_lines=kept,
-                price_y=pixel_y,
-                symbol=self.cfg.symbol,
-                tolerance_px=self.cfg.tolerance_px,
-                min_confidence=self.cfg.min_confidence,
-            )
+            if self.cfg.strategy == "mob_v2":
+                image_shape = (0, 0)
+                cap_shape = record.get("capture", {}).get("shape")
+                if isinstance(cap_shape, (list, tuple)) and len(cap_shape) >= 2:
+                    image_shape = (int(cap_shape[0]), int(cap_shape[1]))
+                sig = generate_signal_via_strategy(
+                    fibo_lines=kept,
+                    image_shape=image_shape,
+                    price_y=pixel_y,
+                    symbol=self.cfg.symbol,
+                    min_confidence=self.cfg.min_confidence,
+                )
+            else:
+                sig = generate_signal(
+                    fibo_lines=kept,
+                    price_y=pixel_y,
+                    symbol=self.cfg.symbol,
+                    tolerance_px=self.cfg.tolerance_px,
+                    min_confidence=self.cfg.min_confidence,
+                )
             side = sig["side"]
             fibo_y = sig["fibo_line_y"]
             conf = float(sig["confidence"])
@@ -597,6 +611,10 @@ def _parse_args(argv: Optional[list[str]] = None) -> WatchLoopConfig:
     ap.add_argument("--dedupe-from-trades-log", action="store_true")
     ap.add_argument("--notify-mode", choices=("off", "dry", "live"), default="off")
     ap.add_argument("--symbol", default="MOCK")
+    ap.add_argument("--strategy", choices=("touch", "mob_v2"), default="touch",
+                    help="touch: Phase-5 nearest-line LONG/FLAT (default). "
+                         "mob_v2: Phase-6 wiring through vision.fibo_line_level_namer "
+                         "+ strategy.fibo_mob_v2.FiboMobV2.evaluate().")
     ns = ap.parse_args(argv)
     return WatchLoopConfig(
         offline_image=ns.offline_image,
@@ -615,6 +633,7 @@ def _parse_args(argv: Optional[list[str]] = None) -> WatchLoopConfig:
         dedupe_from_trades_log=ns.dedupe_from_trades_log,
         notify_mode=ns.notify_mode,
         symbol=ns.symbol,
+        strategy=ns.strategy,
     )
 
 

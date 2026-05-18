@@ -2,12 +2,20 @@
 
 The torch / ultralytics imports are deferred so unit tests do not require
 a GPU build. Returns a list of detected fibo levels with normalized prices.
+
+``FiboDetector.detect`` is the strict API: it raises when torch /
+ultralytics / weights are unavailable. For pipeline integration (where
+the namer in ``vision.fibo_line_level_namer`` wants to fall back to
+position-order naming when YOLO is unavailable) prefer
+``FiboDetector.try_detect`` -- it returns ``None`` instead of raising
+when any prerequisite is missing.
 """
 from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from typing import Any
+from pathlib import Path
+from typing import Any, Optional
 
 
 @dataclass
@@ -43,7 +51,13 @@ class FiboDetector:
         self._model = YOLO(self.weights)
 
     def detect(self, frame) -> FiboDetection:
-        """Run detection on a BGR frame. Returns FiboDetection."""
+        """Run detection on a BGR frame. Returns FiboDetection.
+
+        Raises ``ImportError`` if ultralytics is not installed,
+        ``FileNotFoundError`` if the weights file is missing, and any
+        runtime error from the YOLO call. Use :meth:`try_detect` for
+        a non-raising variant suitable for pipeline integration.
+        """
         self._ensure()
         results = self._model.predict(frame, device=self.device, verbose=False)
         det = FiboDetection(image_shape=(frame.shape[0], frame.shape[1]))
@@ -67,3 +81,36 @@ class FiboDetector:
                 )
             )
         return det
+
+    def try_detect(self, frame) -> Optional[FiboDetection]:
+        """Best-effort detection. Returns ``None`` instead of raising
+        when any prerequisite is missing.
+
+        Returns None if:
+          * ``torch`` or ``ultralytics`` cannot be imported (CPU-only
+            box, or deps not installed yet);
+          * the weights file at ``self.weights`` does not exist;
+          * the YOLO call itself errors out (corrupted weights,
+            CUDA OOM, etc.).
+
+        Returns the FiboDetection in all other cases (including a
+        detection with zero levels -- the namer caller will fall back
+        to position-order naming when ``.ok`` is False).
+
+        This is the pipeline-friendly entry point used by
+        ``vision.fibo_line_level_namer.name_levels`` via the
+        ``yolo_classifier`` parameter.
+        """
+        try:
+            import torch  # noqa: F401
+            import ultralytics  # noqa: F401
+        except ImportError:
+            return None
+
+        if not Path(self.weights).exists():
+            return None
+
+        try:
+            return self.detect(frame)
+        except Exception:
+            return None
