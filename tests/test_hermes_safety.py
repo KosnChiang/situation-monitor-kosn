@@ -83,12 +83,21 @@ def test_no_file_enables_live_mode():
                 pytest.fail(f"{path.name}: forbidden pattern '{pat}' on line: {full_line!r}")
 
 
-def test_start_script_refuses_to_launch_without_hermes_exec():
+def test_start_script_refuses_to_launch_without_verified_entrypoint():
+    """The launcher now launches Hermes via the venv Python entrypoint
+    (`from hermes_cli.main import main`) instead of executing hermes.exe
+    directly, because Windows AppLocker / application-control policies
+    can silently block the .exe. The safety intent is unchanged: refuse
+    to launch unless a verified entrypoint exists. Mechanism swapped
+    from HERMES_EXEC -> HERMES_PY (the venv python path)."""
     txt = HERMES_FILES["start"].read_text(encoding="utf-8")
-    # Must check HERMES_EXEC before any & invocation.
-    assert "if (-not $env:HERMES_EXEC)" in txt
-    assert "Nothing launched" in txt
-    # Example HERMES_EXEC in env file must be commented out.
+    # New mechanism: $env:HERMES_PY must point at a real venv python.
+    assert "$env:HERMES_PY" in txt
+    assert "Hermes venv python not found" in txt
+    # HERMES_EXEC, if set, is deliberately ignored to avoid Windows policy block.
+    assert "HERMES_EXEC is set but ignored" in txt
+    # Example env file must still leave HERMES_EXEC blank by default
+    # (it has no effect now, but a populated value would mislead operators).
     env_txt = HERMES_FILES["env"].read_text(encoding="utf-8")
     assert re.search(r"^\s*HERMES_EXEC\s*=\s*$", env_txt, re.MULTILINE), (
         "configs/hermes.env.example must leave HERMES_EXEC blank by default"
