@@ -14,3 +14,4 @@ logs/*.jpg
 *.onnx
 models/
 logs/*.json
+logs/*.txt
