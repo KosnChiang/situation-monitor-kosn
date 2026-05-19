@@ -1,13 +1,13 @@
-"""BrokerAdapter Protocol + in-repo adapters (Phase 6.A-2).
+"""BrokerAdapter Protocol + in-repo adapters (Phase 6.A-2, 6.A-3 paper impl).
 
-Only the contract and the two in-repo adapters live here:
+Two in-repo adapters live here, both thin wrappers around concrete
+executors:
 
-  * MockBrokerAdapter  — wraps the existing MockExecutor. Pure
-    delegation, no behaviour change. ``name == "mock"``.
-  * PaperBrokerAdapter — Phase 6.A-2 stub. ``submit()`` raises
-    ``NotImplementedError`` so ExecutorRouter records the route as
-    skipped. Phase 6.A-3 will implement it against logs/quotes.jsonl.
-    ``name == "paper"``.
+  * MockBrokerAdapter  — wraps ``executor.mock_executor.MockExecutor``.
+    ``name == "mock"``. Writes to ``logs/trades.jsonl``.
+  * PaperBrokerAdapter — wraps ``paper.paper_executor.PaperExecutor``
+    (Phase 6.A-3 minimal v1). ``name == "paper"``. Writes to
+    ``logs/paper_trades.jsonl``, NEVER to ``logs/trades.jsonl``.
 
 LiveBrokerAdapter is NOT in this repo. The Live execution path lives
 out-of-tree and is loaded via ``LIVE_BROKER_ADAPTER_PATH`` in a later
@@ -15,7 +15,7 @@ phase. ``tests/test_no_live_trading_phase6a2.py`` asserts that no
 concrete ``class LiveBrokerAdapter`` exists in the source tree.
 
 Strictly mock-only:
-  * Imports only stdlib + existing in-repo modules.
+  * Imports only stdlib + in-repo modules.
   * No broker SDK import.
   * No outbound HTTP library.
   * No broker credential env read.
@@ -24,7 +24,8 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
-from executor.mock_executor import MockExecutor, MockFill
+from executor.mock_executor import MockExecutor
+from paper.paper_executor import PaperExecutor
 from strategy.fibo_mob_v2 import Signal
 
 
@@ -39,7 +40,7 @@ class BrokerAdapter(Protocol):
 
     name: str
 
-    def submit(self, signal: Signal) -> MockFill: ...
+    def submit(self, signal: Signal): ...
 
 
 class MockBrokerAdapter:
@@ -50,24 +51,17 @@ class MockBrokerAdapter:
     def __init__(self, executor: MockExecutor | None = None) -> None:
         self._executor = executor or MockExecutor()
 
-    def submit(self, signal: Signal) -> MockFill:
+    def submit(self, signal: Signal):
         return self._executor.submit(signal)
 
 
 class PaperBrokerAdapter:
-    """Phase 6.A-2 stub for a future quote-feed-driven simulator.
-
-    ``submit()`` deliberately raises ``NotImplementedError`` so that
-    ``ExecutorRouter.route()`` catches it and records the outcome as
-    ``submitted=False, skip_reason="paper_not_implemented"`` without
-    polluting ``logs/trades.jsonl``.
-    """
+    """Thin wrapper around paper.PaperExecutor (Phase 6.A-3 minimal v1)."""
 
     name: str = "paper"
 
-    def submit(self, signal: Signal) -> MockFill:  # noqa: ARG002
-        raise NotImplementedError(
-            "PaperBrokerAdapter is a Phase 6.A-2 stub. "
-            "Phase 6.A-3 will implement it against logs/quotes.jsonl. "
-            "Run with EXECUTION_MODE=mock to route through MockExecutor."
-        )
+    def __init__(self, executor: PaperExecutor | None = None) -> None:
+        self._executor = executor or PaperExecutor()
+
+    def submit(self, signal: Signal):
+        return self._executor.submit(signal)

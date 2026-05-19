@@ -38,12 +38,6 @@ def test_paper_adapter_satisfies_protocol():
     assert isinstance(PaperBrokerAdapter(), BrokerAdapter)
 
 
-def test_paper_adapter_submit_raises_not_implemented():
-    sig = Signal("LONG", 100.0, 99.0, 110.0, 0.8, "test")
-    with pytest.raises(NotImplementedError):
-        PaperBrokerAdapter().submit(sig)
-
-
 def test_mock_adapter_delegates_to_passed_executor(tmp_path):
     log = tmp_path / "trades.jsonl"
     adapter = MockBrokerAdapter(MockExecutor(log_path=str(log)))

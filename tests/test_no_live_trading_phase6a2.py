@@ -140,14 +140,6 @@ def test_router_refuses_execution_mode_live(monkeypatch, tmp_path):
         ExecutorRouter(execution_mode="live", log_path=str(tmp_path / "x.jsonl"))
 
 
-def test_paper_adapter_submit_is_not_implemented():
-    from executor.broker_adapter import PaperBrokerAdapter
-    from strategy.fibo_mob_v2 import Signal
-    sig = Signal("LONG", 100.0, 99.0, 110.0, 0.8, "test")
-    with pytest.raises(NotImplementedError):
-        PaperBrokerAdapter().submit(sig)
-
-
 def test_no_live_broker_adapter_concrete_class_in_source():
     """Phase 6.A-4 introduces LiveBrokerAdapter out-of-tree. In Phase
     6.A-2 the concrete class must NOT exist anywhere in the source

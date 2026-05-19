@@ -208,24 +208,48 @@ def test_route_approved_mock_writes_trade_and_outcome(tmp_path):
 
 # ---------- route() approved + paper stub ----------
 
-def test_route_approved_paper_stub_returns_submitted_false(tmp_path):
-    r = ExecutorRouter(execution_mode="paper", log_path=str(tmp_path / "r.jsonl"))
+def test_route_approved_adapter_raising_not_implemented_returns_submitted_false(tmp_path):
+    """Defensive: any BrokerAdapter that raises NotImplementedError is
+    caught by route() and converted to a skipped outcome. (After
+    Phase 6.A-3 the in-repo PaperBrokerAdapter no longer raises, so
+    we exercise the catch path with a deliberate stub adapter.)"""
+
+    class _NotImpl:
+        name = "stub"
+
+        def submit(self, signal):  # noqa: ARG002
+            raise NotImplementedError("intentional stub")
+
+    r = ExecutorRouter(adapter=_NotImpl(), log_path=str(tmp_path / "r.jsonl"))
     out = r.route(_signal(), _approved())
     assert out.submitted is False
-    assert out.skip_reason == "paper_not_implemented"
+    assert out.skip_reason == "stub_not_implemented"
+    assert out.adapter == "stub"
     rows = _read_jsonl(r.log_path)
-    assert rows[-1]["submitted"] is False
-    assert rows[-1]["skip_reason"] == "paper_not_implemented"
-    assert rows[-1]["adapter"] == "paper"
+    assert rows[-1]["skip_reason"] == "stub_not_implemented"
 
 
-def test_route_approved_paper_stub_does_not_write_trade_log(tmp_path):
-    """A paper-stub approval must NEVER pollute logs/trades.jsonl."""
-    trade_log = tmp_path / "trades.jsonl"
-    r = ExecutorRouter(execution_mode="paper", log_path=str(tmp_path / "r.jsonl"))
-    # No adapter override; the in-repo PaperBrokerAdapter is the stub.
-    r.route(_signal(), _approved())
-    assert not trade_log.exists()
+def test_route_approved_paper_writes_paper_trade_not_mock_trade(tmp_path):
+    """EXECUTION_MODE=paper writes to paper_trades.jsonl via
+    PaperBrokerAdapter / PaperExecutor, and NEVER to logs/trades.jsonl."""
+    from executor.broker_adapter import PaperBrokerAdapter
+    from paper.paper_executor import PaperExecutor
+
+    paper_log = tmp_path / "paper_trades.jsonl"
+    mock_trade_log = tmp_path / "trades.jsonl"
+    adapter = PaperBrokerAdapter(executor=PaperExecutor(log_path=str(paper_log)))
+    r = ExecutorRouter(adapter=adapter, log_path=str(tmp_path / "r.jsonl"))
+    out = r.route(_signal(), _approved(), symbol="X")
+    assert out.submitted is True
+    assert out.adapter == "paper"
+    assert out.skip_reason is None
+    assert not mock_trade_log.exists()
+    assert paper_log.exists()
+    paper_rows = _read_jsonl(paper_log)
+    assert any(
+        row.get("event_type") == "paper_open" and row.get("mode") == "paper"
+        for row in paper_rows
+    )
 
 
 # ---------- log invariants ----------
