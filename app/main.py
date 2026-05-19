@@ -21,6 +21,13 @@ load_dotenv()
 
 from approval.approval_gate import ApprovalGate  # noqa: E402
 from approval.models import ApprovalDecision  # noqa: E402
+from app.webhook_ai_swing import (  # noqa: E402
+    TVAlertPayload,
+    process_alert as ai_swing_process_alert,
+    verify_secret as ai_swing_verify_secret,
+    write_webhook_event as ai_swing_write_event,
+    _redact_for_log as ai_swing_redact_for_log,
+)
 from app.webhook_tradingview import (  # noqa: E402
     TVPayload,
     default_webhook_log_path,
@@ -194,3 +201,27 @@ def webhook_tradingview(payload: TVPayload) -> dict:
     )
 
     return {"ok": outcome.submitted, "outcome": outcome.to_log_dict()}
+
+
+@app.post("/webhook/ai-swing")
+def webhook_ai_swing(payload: TVAlertPayload) -> dict:
+    """Phase 7.A AI-swing webhook. Pine-script alerts come here, get
+    converted to ChartContext, fed to the deterministic engine, and
+    (for ENTRY) auto-dispatched via FakeLiveBrokerAdapter.
+
+    Secret env: AI_SWING_WEBHOOK_SECRET. Blank -> 503 disabled.
+    """
+    expected = (os.getenv("AI_SWING_WEBHOOK_SECRET", "") or "").strip()
+    if not expected:
+        ai_swing_write_event(ai_swing_redact_for_log(payload, verdict="disabled"))
+        raise HTTPException(status_code=503, detail="ai-swing webhook disabled")
+
+    if not ai_swing_verify_secret(payload.secret, expected):
+        ai_swing_write_event(ai_swing_redact_for_log(payload, verdict="unauthorized"))
+        raise HTTPException(status_code=401, detail="unauthorized")
+
+    summary = ai_swing_process_alert(
+        payload,
+        mode=(os.getenv("EXECUTION_MODE", "paper") or "paper"),
+    )
+    return summary

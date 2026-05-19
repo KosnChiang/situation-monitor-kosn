@@ -135,8 +135,11 @@ def test_main_repo_does_not_import_keyring():
     skip_dirs = {
         ".git", ".venv", "venv", "node_modules",
         "__pycache__", ".pytest_cache",
-        "tests",   # tests may grep for the string; not import
-        "docs",    # docs may discuss the package
+        "tests",       # tests may grep for the string; not import
+        "docs",        # docs may discuss the package
+        "templates",   # out-of-tree adapter templates (Phase 7.A);
+                       # operator copies these OUT of the main repo,
+                       # they are not on the main repo's runtime path.
     }
     pat = re.compile(r"^\s*(?:import\s+keyring|from\s+keyring\b)", re.MULTILINE)
     offenders: list[str] = []
