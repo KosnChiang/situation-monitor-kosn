@@ -86,7 +86,44 @@ class ExecutorRouter:
         execution_mode: Optional[str] = None,
         log_path: Optional[str] = None,
         live_trading_env: str = "LIVE_TRADING",
+        live_unlock_token: Optional[object] = None,
     ) -> None:
+        # Phase 6.B-1 live unlock path. Default (no token) preserves
+        # the original mock-only construction exactly; existing tests
+        # that don't pass a token continue to exercise the unchanged
+        # default branch.
+        if live_unlock_token is not None:
+            from live.live_unlock_gate import LiveUnlockToken
+
+            if not isinstance(live_unlock_token, LiveUnlockToken):
+                raise LiveTradingForbidden(
+                    "live_unlock_token must be a LiveUnlockToken instance "
+                    "produced by LiveUnlockGate.unlock()"
+                )
+            if live_unlock_token.is_expired():
+                raise LiveTradingForbidden("live_unlock_token is expired")
+
+            live = (os.getenv(live_trading_env, "false") or "").strip().lower()
+            if live != "true":
+                raise LiveTradingForbidden(
+                    f"live_unlock_token provided but {live_trading_env}={live!r}"
+                )
+            if adapter is None:
+                raise LiveTradingForbidden(
+                    "live_unlock_token provided but no adapter; the live "
+                    "path does NOT auto-resolve an adapter -- caller must "
+                    "supply an in-repo fake live adapter (Phase 6.B-1) or "
+                    "a path-loaded real adapter."
+                )
+
+            self.execution_mode = "live"
+            self._adapter = adapter
+            self.log_path = Path(
+                log_path or os.getenv("ROUTER_DECISIONS_LOG", "logs/router_decisions.jsonl")
+            )
+            self.log_path.parent.mkdir(parents=True, exist_ok=True)
+            return
+
         live = (os.getenv(live_trading_env, "false") or "").strip().lower()
         if live != "false":
             raise LiveTradingForbidden(
@@ -103,8 +140,8 @@ class ExecutorRouter:
 
         if mode == "live":
             raise LiveTradingForbidden(
-                "ExecutorRouter refuses EXECUTION_MODE=live in Phase 6.A-2. "
-                "The live unlock ritual is introduced in Phase 6.A-4."
+                "ExecutorRouter refuses EXECUTION_MODE=live without a "
+                "live_unlock_token. Obtain one from LiveUnlockGate.unlock()."
             )
 
         if mode not in VALID_MODES:
