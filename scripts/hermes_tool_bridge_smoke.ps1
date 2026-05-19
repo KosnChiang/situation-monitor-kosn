@@ -95,26 +95,35 @@ Write-Host $prompt
 Write-Host "========================================================================="
 Write-Host ""
 
+# Call hermes via Start-Job + call operator (&) so PowerShell's modern
+# parameter binder handles arg quoting. The previous Start-Process
+# -ArgumentList path silently dropped quotes around `$entrypoint`, so
+# `python.exe -c <multi-token>` only saw the first token (`from`) and
+# died with `SyntaxError: invalid syntax`. See proposal "Option A".
 $tmpOut = New-TemporaryFile
 $tmpErr = New-TemporaryFile
 $entrypoint = "from hermes_cli.main import main; raise SystemExit(main())"
-$p = Start-Process -FilePath $hermesPy `
-    -ArgumentList @("-c", $entrypoint, "-z", $prompt) `
-    -NoNewWindow -PassThru `
-    -RedirectStandardOutput $tmpOut `
-    -RedirectStandardError  $tmpErr
-if (-not $p.WaitForExit(120 * 1000)) {
-    $p.Kill()
+$job = Start-Job -ScriptBlock {
+    param($py, $ep, $promptArg, $outFile, $errFile)
+    & $py -c $ep -z $promptArg 1>$outFile 2>$errFile
+    $LASTEXITCODE
+} -ArgumentList $hermesPy, $entrypoint, $prompt, $tmpOut.FullName, $tmpErr.FullName
+
+if (-not (Wait-Job $job -Timeout 120)) {
+    Stop-Job $job
+    Remove-Job $job -Force
     Write-Host "FAIL: hermes -z timed out after 120 s" -ForegroundColor Red
     Remove-Item $tmpOut, $tmpErr -ErrorAction SilentlyContinue
     exit 3
 }
+$exitCode = Receive-Job $job
+Remove-Job $job
 $reply  = (Get-Content $tmpOut -Raw -ErrorAction SilentlyContinue)
 $stderr = (Get-Content $tmpErr -Raw -ErrorAction SilentlyContinue)
 Remove-Item $tmpOut, $tmpErr -ErrorAction SilentlyContinue
 
-if ($p.ExitCode -ne 0) {
-    Write-Host "FAIL: hermes -z exit $($p.ExitCode)" -ForegroundColor Red
+if ($exitCode -ne 0) {
+    Write-Host "FAIL: hermes -z exit $exitCode" -ForegroundColor Red
     if ($stderr) { Write-Host "stderr:`n$stderr" -ForegroundColor Red }
     exit 3
 }
