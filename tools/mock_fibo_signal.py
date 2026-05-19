@@ -208,6 +208,150 @@ def _submit_through_executor(signal: dict, price_y: float) -> Optional[dict]:
     }
 
 
+def _synthesize_auto_approval(operator_chat_id: str):
+    """Build an auto-approved ApprovalDecision without touching the gate.
+
+    Used by ``--route --approval-mode=none`` so the operator can skip
+    the ApprovalGate dry-run entirely while still routing through
+    ExecutorRouter (so EXECUTION_MODE=paper still works)."""
+    import time as _time
+    from datetime import datetime as _dt, timezone as _tz
+    from approval.models import ApprovalDecision
+
+    ts = _time.time()
+    iso = _dt.now(_tz.utc).isoformat()
+    return ApprovalDecision(
+        request_id=f"cli-auto-{int(ts * 1000)}",
+        approved=True,
+        reason="auto_approved",
+        operator_chat_id=str(operator_chat_id),
+        decided_ts=ts,
+        decided_timestamp=iso,
+        elapsed_ms=0.0,
+    )
+
+
+def _route_through_pipeline(
+    *,
+    signal_record: dict,
+    price_y: float,
+    operator_chat_id: str,
+    approval_mode: str,
+    approval_timeout: float,
+    approvals_log: Optional[str],
+    router_log: Optional[str],
+    execution_mode: Optional[str] = None,
+) -> dict:
+    """Pipe a non-FLAT signal through RiskGate -> ApprovalGate ->
+    ExecutorRouter. Returns a summary dict.
+
+    Notes:
+      * FLAT signals are rejected up-front (no pipeline entry).
+      * ApprovalGate.timeout_seconds is taken from ``approval_timeout``.
+      * Router lazy-constructs so EXECUTION_MODE env is read fresh.
+      * If any gate refuses construction (the kill-switch envelope
+        is not set to false), this function catches it and returns
+        ``routed=False`` with an ``init_failure`` reason; the CLI
+        prints the reason and exits zero (no fill row appears).
+    """
+    if signal_record["side"] == "FLAT":
+        return {"routed": False, "reason": "FLAT signal is not eligible for routing"}
+
+    import threading
+    import time as _time
+
+    from approval.approval_gate import (
+        ApprovalGate,
+        LiveTradingForbidden as ApprovalLiveTradingForbidden,
+    )
+    from executor.executor_router import (
+        ExecutorRouter,
+        LiveTradingForbidden as RouterLiveTradingForbidden,
+    )
+    from risk.risk_gate import (
+        RiskGate,
+        LiveTradingForbidden as RiskLiveTradingForbidden,
+    )
+    from strategy.fibo_mob_v2 import Signal as StrategySignal
+
+    sig = StrategySignal(
+        side=signal_record["side"],
+        entry=float(price_y),
+        stop=float(price_y) + 20.0,
+        target=float(price_y) - 40.0,
+        confidence=float(signal_record["confidence"]),
+        reason=signal_record["reason"],
+    )
+
+    try:
+        risk = RiskGate(min_confidence=float(signal_record["confidence"]))
+    except RiskLiveTradingForbidden as e:
+        return {"routed": False, "reason": f"init_failure: risk_gate {e}"}
+
+    risk_decision = risk.check(sig)
+    if not risk_decision.approved:
+        return {
+            "routed": False,
+            "reason": f"risk_gate rejected: {risk_decision.reason}",
+        }
+
+    if approval_mode == "none":
+        approval = _synthesize_auto_approval(operator_chat_id)
+    else:
+        try:
+            gate = ApprovalGate(
+                timeout_seconds=approval_timeout,
+                allowed_chat_ids=[str(operator_chat_id)],
+                log_path=approvals_log,
+            )
+        except ApprovalLiveTradingForbidden as e:
+            return {"routed": False, "reason": f"init_failure: approval_gate {e}"}
+
+        req = gate.request(
+            symbol=signal_record["symbol"],
+            side=sig.side,
+            entry=sig.entry,
+            stop=sig.stop,
+            target=sig.target,
+            confidence=sig.confidence,
+            reason=sig.reason,
+        )
+
+        if approval_mode in ("auto-approve", "auto-reject"):
+            approve_flag = (approval_mode == "auto-approve")
+
+            def _submit() -> None:
+                _time.sleep(0.01)
+                gate.submit_decision(
+                    req.request_id,
+                    approve=approve_flag,
+                    operator_chat_id=str(operator_chat_id),
+                )
+
+            threading.Thread(target=_submit, daemon=True).start()
+        # "timeout" -> do not submit; await_decision will record timeout.
+        approval = gate.await_decision(req)
+
+    try:
+        router = ExecutorRouter(
+            execution_mode=execution_mode,
+            log_path=router_log,
+        )
+    except RouterLiveTradingForbidden as e:
+        return {"routed": False, "reason": f"init_failure: router {e}"}
+
+    outcome = router.route(sig, approval, symbol=signal_record["symbol"])
+    return {
+        "routed": True,
+        "submitted": outcome.submitted,
+        "adapter": outcome.adapter,
+        "execution_mode": outcome.execution_mode,
+        "skip_reason": outcome.skip_reason,
+        "approval_reason": approval.reason,
+        "approval_request_id": approval.request_id,
+    }
+
+
 def _notify_telegram(signal: dict, fill: Optional[dict], suppressed: bool) -> Optional[dict]:
     """Dry-run-safe Telegram notification after submit. Never raises.
 
@@ -290,7 +434,71 @@ def main() -> int:
              "notification is built but the bot stays in dry-run unless "
              "TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID are set in env.",
     )
+    ap.add_argument(
+        "--route",
+        action="store_true",
+        help="route the signal through RiskGate -> ApprovalGate -> "
+             "ExecutorRouter so EXECUTION_MODE=paper actually reaches "
+             "PaperExecutor. Mutually exclusive with --submit (legacy "
+             "MockExecutor-direct path).",
+    )
+    ap.add_argument(
+        "--approval-mode",
+        default="none",
+        choices=("auto-approve", "auto-reject", "timeout", "none"),
+        help="how ApprovalGate is exercised under --route. "
+             "auto-approve/auto-reject: spawn a worker thread that submits "
+             "a decision after a tiny delay. timeout: let ApprovalGate "
+             "fire its own timeout decision. none (default): skip "
+             "ApprovalGate entirely and synthesize an auto_approved "
+             "decision for the router.",
+    )
+    ap.add_argument(
+        "--operator-chat-id",
+        default="12345",
+        help="simulated operator chat id for ApprovalGate's allowlist "
+             "and the submit_decision callback under --route.",
+    )
+    ap.add_argument(
+        "--approval-timeout",
+        type=float,
+        default=5.0,
+        help="ApprovalGate timeout in seconds under --route. Tests may "
+             "set this very small (e.g. 0.1) to exercise the timeout "
+             "branch quickly.",
+    )
+    ap.add_argument(
+        "--approvals-log",
+        default=None,
+        help="ApprovalGate log path override (default: env APPROVALS_LOG "
+             "or logs/approvals.jsonl).",
+    )
+    ap.add_argument(
+        "--router-log",
+        default=None,
+        help="ExecutorRouter log path override (default: env "
+             "ROUTER_DECISIONS_LOG or logs/router_decisions.jsonl).",
+    )
+    ap.add_argument(
+        "--execution-mode",
+        default=None,
+        choices=("mock", "paper"),
+        help="explicit execution mode for ExecutorRouter under "
+             "--route. When omitted, Router reads EXECUTION_MODE env. "
+             "Note: the EXECUTION_MODE env must remain 'mock' for "
+             "RiskGate's invariant; this flag lets the routed signal "
+             "land in PaperExecutor without violating that.",
+    )
     args = ap.parse_args()
+
+    if args.submit and args.route:
+        print(
+            "ERROR: --submit and --route are mutually exclusive. "
+            "--submit goes directly to MockExecutor (legacy); --route "
+            "goes through RiskGate -> ApprovalGate -> ExecutorRouter.",
+            file=sys.stderr,
+        )
+        return 2
 
     fibo_path = Path(args.fibo_lines)
     if not fibo_path.exists():
@@ -353,13 +561,26 @@ def main() -> int:
 
     fill = None
     notify = None
+    route_summary: Optional[dict] = None
     if args.submit:
         fill = _submit_through_executor(signal, price_y)
         notify = _notify_telegram(signal, fill, suppressed=args.no_telegram)
+    elif args.route:
+        route_summary = _route_through_pipeline(
+            signal_record=signal,
+            price_y=price_y,
+            operator_chat_id=args.operator_chat_id,
+            approval_mode=args.approval_mode,
+            approval_timeout=args.approval_timeout,
+            approvals_log=args.approvals_log,
+            router_log=args.router_log,
+            execution_mode=args.execution_mode,
+        )
 
     if args.json:
         print(json.dumps(
             {"signal": signal, "fill": fill, "notify": notify,
+             "route": route_summary,
              "strategy": args.strategy, "price_source": price_note},
             ensure_ascii=False,
         ))
@@ -387,6 +608,19 @@ def main() -> int:
             print(f"not submitted: {fill.get('reason', 'rejected by risk gate')}")
         elif args.submit:
             print("not submitted: signal is FLAT")
+        if route_summary is not None:
+            if route_summary.get("routed"):
+                print(
+                    f"routed  via ExecutorRouter ({route_summary['execution_mode']}/"
+                    f"{route_summary['adapter']}) submitted={route_summary['submitted']}"
+                    + (f" skip_reason={route_summary['skip_reason']}" if route_summary.get('skip_reason') else "")
+                )
+                print(
+                    f"approval reason={route_summary.get('approval_reason')} "
+                    f"request_id={route_summary.get('approval_request_id')}"
+                )
+            else:
+                print(f"not routed: {route_summary.get('reason')}")
     return 0
 
 
