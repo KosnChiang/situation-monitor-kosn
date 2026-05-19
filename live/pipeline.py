@@ -39,7 +39,7 @@ from typing import Any, Optional
 from ai_decision.models import AIDecision
 from ai_decision.validator import validate_ai_decision
 from live.audit_log import default_rejection_log_path, write_live_rejection
-from live.fake_live_adapter import FakeLiveBrokerAdapter
+from live.broker_adapter_protocol import LiveBrokerAdapterProtocol
 from live.kill_switch import KillSwitch
 from live.live_unlock_gate import LiveUnlockForbidden, LiveUnlockGate
 from live.micro_live_gate import MicroLiveGate
@@ -81,7 +81,7 @@ class LivePipeline:
     def __init__(
         self,
         *,
-        adapter: FakeLiveBrokerAdapter,
+        adapter: LiveBrokerAdapterProtocol,
         kill_switch: Optional[KillSwitch] = None,
         unlock_gate: Optional[LiveUnlockGate] = None,
         micro_gate: Optional[MicroLiveGate] = None,
@@ -91,8 +91,9 @@ class LivePipeline:
     ) -> None:
         if adapter is None:
             raise ValueError(
-                "LivePipeline requires a FakeLiveBrokerAdapter; the pipeline "
-                "deliberately does NOT auto-resolve an adapter."
+                "LivePipeline requires a LiveBrokerAdapterProtocol-compatible "
+                "adapter; the pipeline deliberately does NOT auto-resolve. "
+                "The caller (CLI or test) chooses fake vs path-loaded."
             )
         self.adapter = adapter
         self.unlock_gate = unlock_gate or LiveUnlockGate()

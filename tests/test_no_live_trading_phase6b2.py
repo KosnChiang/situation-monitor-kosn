@@ -118,10 +118,12 @@ def test_pipeline_does_not_dynamically_load_adapter_path():
 
 
 def test_pipeline_only_imports_fake_live_adapter_concrete_class():
-    """The pipeline source imports FakeLiveBrokerAdapter exactly once
-    and does NOT mention any other concrete adapter class name."""
+    """As of Phase 6.B-4 the pipeline imports the Protocol rather than
+    the concrete fake adapter -- so the caller (CLI or test) chooses
+    fake vs path-loaded. Either reference is acceptable; what must
+    NOT appear is any real-broker concrete class name."""
     src = (ROOT / "live" / "pipeline.py").read_text(encoding="utf-8")
-    assert "FakeLiveBrokerAdapter" in src
+    assert "LiveBrokerAdapterProtocol" in src or "FakeLiveBrokerAdapter" in src
     # No real-broker concrete class names appear:
     for forbidden in (
         "IBBrokerAdapter", "CTProBrokerAdapter", "MT5BrokerAdapter",

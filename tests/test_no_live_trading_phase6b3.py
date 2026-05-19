@@ -174,9 +174,13 @@ def test_loader_not_wired_into_pipeline_yet():
     )
 
 
-def test_loader_not_wired_into_cli_yet():
-    """The dry-run CLI must continue to hardcode FakeLiveBrokerAdapter
-    in Phase 6.B-3a; loader integration is Phase 6.B-4."""
+def test_loader_is_wired_into_cli_via_external_flag():
+    """As of Phase 6.B-4 the dry-run CLI imports the loader so the
+    --adapter-source=external code path can resolve. The fake-default
+    path is still hardcoded to FakeLiveBrokerAdapter and must NOT
+    trigger any loader call -- that runtime invariant is asserted by
+    test_no_live_trading_phase6b4.py (which spies os.getenv to confirm
+    LIVE_BROKER_ADAPTER_PATH is never read in fake mode)."""
     cli_src = (ROOT / "tools" / "dry_run_live_order.py").read_text(encoding="utf-8")
-    assert "adapter_loader" not in cli_src
-    assert "resolve_live_adapter" not in cli_src
+    assert "resolve_live_adapter" in cli_src
+    assert "from live.adapter_loader" in cli_src

@@ -14,15 +14,22 @@ Exit codes:
   5  MicroLiveGate rejected
   6  adapter error
   7  ai_decision valid but not tradable (FLAT / WATCH / low confidence)
+  8  adapter load failure (external mode only; Phase 6.B-4)
 
 Usage:
     python -m tools.dry_run_live_order --ai-decision decision.json
     cat decision.json | python -m tools.dry_run_live_order --ai-decision -
     python -m tools.dry_run_live_order --ai-decision decision.json --json
+    python -m tools.dry_run_live_order --ai-decision d.json --adapter-source external
 
 Mock-only:
-  * Imports only the in-repo fake adapter.
-  * No broker SDK, no outbound HTTP, no broker credential env read.
+  * Default --adapter-source=fake hardcodes the in-repo fake adapter and
+    NEVER invokes the loader (Phase 6.B-2 behaviour).
+  * --adapter-source=external invokes live.adapter_loader.resolve_live_adapter
+    which respects FAKE_LIVE_ADAPTER / LIVE_BROKER_ADAPTER_PATH env.
+    The path-loaded adapter is operator-supplied and lives OUT-OF-TREE.
+  * No broker SDK, no outbound HTTP, no broker credential env read at
+    the CLI / pipeline layer.
 """
 from __future__ import annotations
 
@@ -37,6 +44,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from live.adapter_loader import LiveAdapterLoadError, resolve_live_adapter  # noqa: E402
 from live.fake_live_adapter import FakeLiveBrokerAdapter  # noqa: E402
 from live.kill_switch import KillSwitch  # noqa: E402
 from live.live_unlock_gate import LiveUnlockGate  # noqa: E402
@@ -86,6 +94,21 @@ def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         action="store_true",
         help="Emit a machine-readable JSON summary to stdout instead of text.",
     )
+    ap.add_argument(
+        "--adapter-source",
+        default="fake",
+        choices=("fake", "external"),
+        help=(
+            "fake (default): hardcoded in-repo FakeLiveBrokerAdapter; the "
+            "loader is NOT invoked. external: invokes "
+            "live.adapter_loader.resolve_live_adapter to choose between "
+            "fake (via FAKE_LIVE_ADAPTER=true) and a path-loaded plugin "
+            "(via LIVE_BROKER_ADAPTER_PATH). external mode uses env vars "
+            "for log paths -- the --orders-log / --fills-log / "
+            "--rejections-log CLI args are honoured only by the "
+            "fake-default adapter."
+        ),
+    )
     return ap.parse_args(argv)
 
 
@@ -118,16 +141,58 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 2
 
     kill_file = args.kill_file or "logs/.killswitch"
+
+    # Phase 6.B-4: pre-check the kill switch BEFORE adapter load so a
+    # killed session does not even attempt to load an external adapter.
+    pre_ks = KillSwitch(kill_file_path=kill_file)
+    pre_active, pre_reasons = pre_ks.is_active()
+    if pre_active:
+        pre_summary = {
+            "outcome": "killed",
+            "exit_code": 4,
+            "decision_id": None,
+            "order_id": None,
+            "fill_price": None,
+            "rejection_reason": (
+                "kill_switch_active_at_startup:" + ";".join(pre_reasons)
+            ),
+        }
+        print(
+            f"ABORT: kill switch active at startup (adapter load skipped): "
+            f"{pre_reasons}",
+            file=sys.stderr,
+        )
+        if args.json:
+            print(json.dumps(pre_summary, ensure_ascii=False))
+        else:
+            print(f"outcome      : killed")
+            print(f"exit_code    : 4")
+            print(f"rejection_reason : {pre_summary['rejection_reason']}")
+        return 4
+
     fake_equity_kwargs: dict = {}
     if args.operator_equity is not None:
         fake_equity_kwargs["account_equity"] = args.operator_equity
 
-    adapter = FakeLiveBrokerAdapter(
-        order_log_path=args.orders_log,
-        fill_log_path=args.fills_log,
-        rejection_log_path=args.rejections_log,
-        **fake_equity_kwargs,
-    )
+    if args.adapter_source == "fake":
+        # Default fake-direct path: CLI args control log paths; loader
+        # is NEVER invoked (Phase 6.B-2 behaviour preserved exactly).
+        adapter = FakeLiveBrokerAdapter(
+            order_log_path=args.orders_log,
+            fill_log_path=args.fills_log,
+            rejection_log_path=args.rejections_log,
+            **fake_equity_kwargs,
+        )
+    else:
+        # external: delegate to the loader. Log paths come from env;
+        # --orders-log / --fills-log / --rejections-log are not honoured
+        # here (the loaded adapter constructs itself with its own defaults).
+        try:
+            adapter = resolve_live_adapter()
+        except LiveAdapterLoadError as e:
+            print(f"ABORT: adapter load failed: {e}", file=sys.stderr)
+            return 8
+
     kill_switch = KillSwitch(kill_file_path=kill_file)
     unlock_gate = LiveUnlockGate(kill_file_path=kill_file)
     micro_gate = MicroLiveGate(rejection_log_path=args.rejections_log)
