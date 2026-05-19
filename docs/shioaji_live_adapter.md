@@ -3,6 +3,13 @@
 Operator-facing notes for the Sinotrade Shioaji adapter template that
 ships under `templates/shioaji_live_adapter/`.
 
+> **Phase 7.A-1 update**: the template has been aligned with the
+> Shioaji 1.2.x official API. Futures `order_type` now uses
+> `sj.constant.OrderType` (the shared enum), not the non-existent
+> `FuturesOrderType`. `requirements.txt` pins `shioaji>=1.2.0,<2.0.0`
+> to track the current stable line and stay clear of a future 2.x
+> breaking-change boundary.
+
 The template is meant to be **copied out** of the main repo into the
 operator's own working directory (default
 `C:\Trading\live-adapters\shioaji\`). The main repo never imports

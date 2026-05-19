@@ -60,6 +60,62 @@ $env:SHIOAJI_SIMULATION = "false"  # REAL MONEY -- only after deliberate opt-in
 When the adapter constructs, it reads this env. If unset, defaults to
 `true` (paper) for safety.
 
+## Operator verification before first connect
+
+Before the first `tools.run_live_order --adapter-source external`
+invocation against this template, run these three sanity checks
+inside the adapter's own venv. They confirm the public API surface
+on the installed Shioaji version matches what this template assumes.
+
+```powershell
+cd C:\Trading\live-adapters\shioaji
+.\.venv\Scripts\Activate.ps1
+```
+
+### 1. `sj.constant.OrderType` exists
+
+```powershell
+python -c "import shioaji as sj; print('OrderType.IOC =', sj.constant.OrderType.IOC); print('OrderType.ROD =', sj.constant.OrderType.ROD)"
+```
+
+This must print the two enum values without error. If
+`AttributeError: module 'shioaji.constant' has no attribute 'OrderType'`
+appears, the SDK has renamed the enum -- adjust the `submit_order`
+call accordingly (search `tutor/order/FutureOption/` on the official
+docs for the current path).
+
+### 2. `api.Contracts.Futures` lists TMF (微型台指)
+
+```powershell
+python -c "import shioaji as sj; api = sj.Shioaji(simulation=True); api.login('YOUR_KEY','YOUR_SECRET'); print([c.code for c in api.Contracts.Futures if c.code.startswith('TMF')])"
+```
+
+The output should be a non-empty list of TMF contract codes
+(e.g. `['TMFR1', 'TMF202506', ...]`). If empty, your account may not
+yet have futures permissions, or the SDK enumerates futures
+differently in this version -- adjust the `_resolve_tmf_contract`
+loop.
+
+### 3. `account_balance` / `list_positions` method names
+
+The template calls `api.account_balance()` and
+`api.list_positions(api.futopt_account)`. These method names are
+not in the public quickstart / README; verify against your installed
+version:
+
+```powershell
+python -c "import shioaji as sj; api = sj.Shioaji(simulation=True); print([m for m in dir(api) if 'balance' in m.lower() or 'position' in m.lower()])"
+```
+
+If `account_balance` / `list_positions` are missing and a similar
+method (e.g. `margin`, `list_position`, `get_account_balance`) is
+present, edit those two methods in `live_adapter.py` accordingly.
+
+The Phase 6.B-1 `LiveBrokerAdapterProtocol` only mandates that
+`account_equity()` and `positions()` return the right types -- the
+internal Shioaji call is operator-side and may differ across SDK
+versions.
+
 ## Wiring into the main repo
 
 ```powershell

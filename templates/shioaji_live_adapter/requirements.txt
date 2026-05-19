@@ -1,4 +1,4 @@
 # Shioaji LiveAdapter requirements -- install in the OUT-OF-TREE
 # adapter's OWN venv, NOT the main repo's .venv.
-shioaji>=1.0.0
+shioaji>=1.2.0,<2.0.0
 keyring>=23.0

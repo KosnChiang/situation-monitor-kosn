@@ -159,7 +159,7 @@ class LiveAdapter:
             price=float(order.entry),
             quantity=int(order.qty),
             price_type=sj.constant.FuturesPriceType.MKT,
-            order_type=sj.constant.FuturesOrderType.IOC,
+            order_type=sj.constant.OrderType.IOC,
             octype=sj.constant.FuturesOCType.Auto,
             account=self._api.futopt_account,
         )
