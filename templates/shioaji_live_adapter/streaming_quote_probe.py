@@ -103,30 +103,97 @@ def _append_json_line(path: Path, record: dict) -> None:
 
 
 def _resolve_tmf_contract(api, requested_code: str | None):
-    """Pick the TMF contract whose code matches ``requested_code``; if
-    ``requested_code`` is empty, fall back to the nearest TMF contract by
-    available date field.
+    """Pick the TMF (micro-TX) contract to subscribe against.
 
-    Re-implements the live_adapter.py selection so this probe stays runnable
-    even if ``live_adapter.py`` is missing or edited in the operator's tree.
+    Mirrors the Phase 7.A-2 resolver in ``live_adapter.py``: prefer
+    attribute access on the ``api.Contracts.Futures.TMF`` sub-namespace
+    (shioaji 1.3.x shape, where ``for c in api.Contracts.Futures``
+    yields nothing on a paper session) before falling back to legacy
+    iteration. Adds step 0 for the ``--code`` CLI flag so the operator
+    can pin a specific contract.
+
+    Resolution order:
+
+      0. If ``requested_code`` is truthy:
+         a. ``api.Contracts.Futures.TMF.<requested_code>`` attribute
+         b. Iterate ``api.Contracts.Futures`` and match ``c.code``
+         Raise if neither finds it -- operator asked for a specific
+         contract, do not silently pick a different one.
+      1. ``api.Contracts.Futures.TMF.TMFR1`` -- broker-maintained
+         front-month roll alias. Default pick.
+      2. Nearest dated ``TMF<YYYYMM>`` under
+         ``api.Contracts.Futures.TMF`` by lexical sort of YYYYMM.
+      3. Legacy fallback: iterate ``api.Contracts.Futures`` and pick by
+         code/name match, sorted by ``delivery_date`` /
+         ``delivery_month`` / ``underlying_kind``.
+
+    Raises ``RuntimeError`` with an explicit "checked X, Y, Z" message
+    when nothing matches.
     """
+    futures = api.Contracts.Futures
+    tmf_ns = getattr(futures, "TMF", None)
+
+    # ---- 0. operator-specified code ----
+    if requested_code:
+        if tmf_ns is not None:
+            found = getattr(tmf_ns, requested_code, None)
+            if found is not None:
+                return found
+        try:
+            for c in futures:
+                if getattr(c, "code", "") == requested_code:
+                    return c
+        except TypeError:
+            pass
+        raise RuntimeError(
+            f"requested TMF contract code {requested_code!r} not found "
+            f"(checked api.Contracts.Futures.TMF.{requested_code} and "
+            "Contracts.Futures iteration)"
+        )
+
+    # ---- 1 + 2. attribute path (shioaji 1.3.x shape) ----
+    if tmf_ns is not None:
+        front = getattr(tmf_ns, "TMFR1", None)
+        if front is not None:
+            return front
+        dated: list[tuple[str, object]] = []
+        for attr in dir(tmf_ns):
+            if not attr.startswith("TMF"):
+                continue
+            suffix = attr[3:]
+            if len(suffix) == 6 and suffix.isdigit():
+                c = getattr(tmf_ns, attr, None)
+                if c is not None:
+                    dated.append((suffix, c))
+        if dated:
+            dated.sort(key=lambda x: x[0])
+            return dated[0][1]
+
+    # ---- 3. legacy iteration fallback ----
     candidates = []
-    for c in api.Contracts.Futures:
-        code = getattr(c, "code", "") or ""
-        name = getattr(c, "name", "") or ""
-        if requested_code and code == requested_code:
-            return c
-        if (code.startswith("TMF")
-                or "微型台指" in name
-                or "Mini TX" in name.replace(" ", "")):
-            candidates.append(c)
+    try:
+        for c in futures:
+            code = getattr(c, "code", "") or ""
+            name = getattr(c, "name", "") or ""
+            if (code.startswith("TMF")
+                    or "微型台指" in name
+                    or "Mini TX" in name.replace(" ", "")):
+                candidates.append(c)
+    except TypeError:
+        candidates = []
+    except Exception as exc:
+        raise RuntimeError(f"failed to enumerate futures: {exc}") from exc
+
     if not candidates:
         raise RuntimeError(
-            "no micro-TX (TMF / 微型台指) contract found in Shioaji catalog"
+            "no micro-TX (TMF / 微型台指) contract found in Shioaji catalog "
+            "(checked api.Contracts.Futures.TMF.TMFR1, dated "
+            "TMFYYYYMM, and Contracts.Futures iteration)"
         )
     candidates.sort(key=lambda c: (
         getattr(c, "delivery_date", "")
         or getattr(c, "delivery_month", "")
+        or getattr(c, "underlying_kind", "")
         or ""
     ))
     return candidates[0]
