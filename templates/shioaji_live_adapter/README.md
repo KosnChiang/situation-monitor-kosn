@@ -9,6 +9,8 @@ before using; the main repo never imports or installs the Shioaji SDK.
 | File | Purpose |
 |---|---|
 | `live_adapter.py` | The `class LiveAdapter` implementing the main repo's `LiveBrokerAdapterProtocol`. |
+| `streaming_quote_probe.py` | Phase 7.B-1 probe: subscribes to streaming tick / bidask frames for one TMF contract and writes a Quote-shaped JSONL. Read-only, simulation-only, finite duration. |
+| `simulation_order_probe.py` | Phase 7.C probe: end-to-end Shioaji order smoke against the simulation account. **Dry-run by default**; `--confirm-simulation-submit` required to actually call `api.place_order`. |
 | `requirements.txt` | Python deps (`shioaji`, `keyring`). Install into the **adapter's own venv**, not the main repo's `.venv`. |
 | `README.md` | This file. |
 
@@ -123,6 +125,93 @@ The Phase 6.B-1 `LiveBrokerAdapterProtocol` only mandates that
 internal Shioaji call is operator-side and may differ across SDK
 versions.
 
+## Streaming Quote Probe (Phase 7.B-1)
+
+`streaming_quote_probe.py` subscribes to streaming TICK and/or BIDASK
+frames for one TMF contract via `api.quote.subscribe(...)`, writes each
+received frame as one JSON line to `--output`, and unsubscribes / logs
+out after `--seconds`.
+
+* **Read-only.** Never references `place_order` / `submit_order`.
+* **Finite.** `--seconds` is required; the probe never runs forever.
+* **Simulation only.** Refuses to start unless `SHIOAJI_SIMULATION` is
+  truthy (`true` / `1` / `yes` / `on`; default unset behaves as truthy).
+  `sj.Shioaji(simulation=True)` is hard-pinned at construction.
+
+JSONL row shape matches the main repo's `Quote` schema so
+`tools/mock_fibo_signal.py --price-source latest_quote` can consume the
+file unmodified:
+
+```json
+{"symbol":"TMFR1","bid":22919.0,"ask":22920.0,"last":22919.5,
+ "ts":1747800000.0,"timestamp":"2026-05-21T01:20:00+00:00",
+ "source":"shioaji-bidask"}
+```
+
+Operator run, from the copied-out adapter dir:
+
+```powershell
+cd C:\Trading\live-adapters\shioaji
+.\.venv\Scripts\Activate.ps1
+$env:SHIOAJI_SIMULATION = "true"
+python streaming_quote_probe.py --code TMFR1 --seconds 30 `
+    --output logs\probe_quotes.jsonl
+Get-Content logs\probe_quotes.jsonl | Select-Object -Last 5
+```
+
+If `--quote-type both` is passed, both tick and bidask callbacks are
+registered. Field names inside the callback objects vary across Shioaji
+SDK versions; the probe reads them defensively and writes 0.0 for
+anything missing rather than crashing.
+
+## Simulation Order Smoke (Phase 7.C)
+
+`simulation_order_probe.py` exercises the full Shioaji order path
+against the simulation account. Layered safety:
+
+| Layer | Effect |
+|---|---|
+| `SHIOAJI_SIMULATION` env | Must be truthy; the probe exits with code 2 otherwise. |
+| `sj.Shioaji(simulation=True)` | Hard-pinned in source; nothing on the command line can flip it. |
+| `--confirm-simulation-submit` | **Required** to call `api.place_order`. Without it the probe logs the intent to JSONL and exits. |
+
+### Dry-run (default, safe)
+
+```powershell
+cd C:\Trading\live-adapters\shioaji
+.\.venv\Scripts\Activate.ps1
+$env:SHIOAJI_SIMULATION = "true"
+python simulation_order_probe.py --code TMFR1 --side LONG --qty 1
+Get-Content logs\shioaji_simulation_smoke.jsonl
+```
+
+The JSONL will contain exactly one `{"kind":"intent",...,"dry_run":true}`
+row. No order was sent.
+
+### Real simulation submit (still simulation account)
+
+```powershell
+python simulation_order_probe.py --code TMFR1 --side LONG --qty 1 `
+    --confirm-simulation-submit
+```
+
+The JSONL will contain an `intent` row (with `"dry_run":false`) followed
+by a `submit` row carrying the Shioaji-reported status, order id, and
+fill price.
+
+### Submit, then cancel after N seconds
+
+```powershell
+python simulation_order_probe.py --code TMFR1 --side LONG --qty 1 `
+    --confirm-simulation-submit --cancel-after 5
+```
+
+After submit, the probe sleeps 5 seconds, calls
+`api.cancel_order(trade)`, and appends a `cancel` row with
+`cancel_ok` + any error text. Cancel uses the in-process `Trade` object
+returned by `place_order`, so it does not depend on the operator
+maintaining an external order-id map.
+
 ## Wiring into the main repo
 
 ```powershell
@@ -189,7 +278,9 @@ Each TMF contract: **NT$10 / point / contract**. The main repo's
   broker UI -- see `docs/emergency_stop.md`).
 - Auto-flatten on session close.
 - Multi-leg / OCO orders.
-- Real-time market data subscription (Phase 7.B+).
+- Real-time market data subscription **inside `live_adapter.py`** (the
+  Phase 7.B-1 `streaming_quote_probe.py` exercises subscribe end-to-end,
+  but the adapter itself is order-only).
 - Order book / depth queries.
 
 These are operator-side extensions.
