@@ -106,16 +106,50 @@ class LiveAdapter:
     # ---- TMF contract resolution ----
 
     def _resolve_tmf_contract(self):
-        """Find the nearest tradable micro-TX contract dynamically.
+        """Find the nearest tradable micro-TX (TMF) contract.
 
-        Operator NOTE: Shioaji's contract API returns objects whose
-        date / month fields vary by SDK version. This function picks
-        any contract whose code starts with 'TMF' or whose name
-        contains the micro-TX label, then sorts by available date
-        field. If no match, raises.
+        Phase 7.A-2: prefer attribute access on the
+        ``api.Contracts.Futures.TMF`` sub-namespace, then fall back to
+        iteration. Operator verification on shioaji 1.3.3 showed
+        ``for c in api.Contracts.Futures`` yields nothing on a paper
+        session, while ``api.Contracts.Futures.TMF`` is fully populated
+        (e.g. ``TMFR1``, ``TMFR2``, ``TMF202605`` ... ``TMF202703``).
+
+        Resolution order:
+
+        1. ``api.Contracts.Futures.TMF.TMFR1`` -- the broker-maintained
+           front-month roll alias. This is what an operator typing
+           "buy 1 lot of TMF" almost always wants.
+        2. Nearest dated contract ``TMFYYYYMM`` under
+           ``api.Contracts.Futures.TMF`` by lexical sort of ``YYYYMM``
+           (``YYYYMM`` sorts identically to the calendar).
+        3. Legacy fallback: iterate ``api.Contracts.Futures`` and pick
+           by code/name match. Kept for older SDKs that do expose the
+           futures container as iterable.
         """
         if self._api is None:
             raise RuntimeError("Shioaji api not initialised; call connect() first")
+
+        # 1 + 2. Attribute-access path (shioaji 1.3.x shape).
+        tmf_ns = getattr(self._api.Contracts.Futures, "TMF", None)
+        if tmf_ns is not None:
+            front = getattr(tmf_ns, "TMFR1", None)
+            if front is not None:
+                return front
+            dated = []
+            for attr in dir(tmf_ns):
+                if not attr.startswith("TMF"):
+                    continue
+                suffix = attr[3:]
+                if len(suffix) == 6 and suffix.isdigit():
+                    c = getattr(tmf_ns, attr, None)
+                    if c is not None:
+                        dated.append((suffix, c))
+            if dated:
+                dated.sort(key=lambda x: x[0])
+                return dated[0][1]
+
+        # 3. Legacy iteration fallback.
         candidates = []
         try:
             for c in self._api.Contracts.Futures:
@@ -125,12 +159,18 @@ class LiveAdapter:
                         or "微型台指" in name
                         or "Mini TX" in name.replace(" ", "")):
                     candidates.append(c)
+        except TypeError:
+            candidates = []
         except Exception as exc:
             raise RuntimeError(f"failed to enumerate futures: {exc}") from exc
+
         if not candidates:
             raise RuntimeError(
-                "no micro-TX (TMF / 微型台指) contract found in Shioaji catalog"
+                "no micro-TX (TMF) contract found in Shioaji catalog "
+                "(checked api.Contracts.Futures.TMF.TMFR1, dated "
+                "TMFYYYYMM, and Contracts.Futures iteration)"
             )
+
         def _sort_key(c):
             return (
                 getattr(c, "delivery_date", "")

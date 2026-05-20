@@ -84,17 +84,24 @@ appears, the SDK has renamed the enum -- adjust the `submit_order`
 call accordingly (search `tutor/order/FutureOption/` on the official
 docs for the current path).
 
-### 2. `api.Contracts.Futures` lists TMF (微型台指)
+### 2. `api.Contracts.Futures.TMF` lists TMF (微型台指)
+
+On shioaji 1.3.x, `api.Contracts.Futures` is **not iterable** on a
+paper session, but the TMF sub-namespace is populated as attributes.
+Verify with:
 
 ```powershell
-python -c "import shioaji as sj; api = sj.Shioaji(simulation=True); api.login('YOUR_KEY','YOUR_SECRET'); print([c.code for c in api.Contracts.Futures if c.code.startswith('TMF')])"
+python -c "import shioaji as sj; api = sj.Shioaji(simulation=True); api.login('YOUR_KEY','YOUR_SECRET'); print([n for n in dir(api.Contracts.Futures.TMF) if n.startswith('TMF')])"
 ```
 
-The output should be a non-empty list of TMF contract codes
-(e.g. `['TMFR1', 'TMF202506', ...]`). If empty, your account may not
-yet have futures permissions, or the SDK enumerates futures
-differently in this version -- adjust the `_resolve_tmf_contract`
-loop.
+The output should be a non-empty list like
+`['TMF202605', 'TMF202606', 'TMF202607', 'TMF202609', 'TMF202612', 'TMF202703', 'TMFR1', 'TMFR2']`.
+If empty, your account may not yet have futures permissions.
+
+`TMFR1` is the broker-maintained front-month roll alias; the
+template prefers it. If for some reason `TMFR1` is absent, the
+template falls back to the nearest dated `TMFYYYYMM` (sorted by
+`YYYYMM`), then to legacy iteration over `api.Contracts.Futures`.
 
 ### 3. `account_balance` / `list_positions` method names
 
@@ -154,11 +161,22 @@ The loader will refuse if:
 
 ## TMF (micro-TX) contract resolution
 
-The template enumerates `api.Contracts.Futures` and picks any
-contract whose `code` starts with `TMF` or whose `name` contains
-`微型台指` / `Mini TX`. It sorts by available date / month field
-to pick the nearest expiry. The operator may want to refine this
-logic for specific roll behaviour.
+`_resolve_tmf_contract` (Phase 7.A-2) resolves in this order:
+
+1. **`api.Contracts.Futures.TMF.TMFR1`** -- the broker-maintained
+   front-month roll alias. Almost always what an operator typing
+   "buy 1 lot of TMF" wants.
+2. **Nearest dated `TMFYYYYMM`** under
+   `api.Contracts.Futures.TMF`, picked by lexical sort of `YYYYMM`
+   (which matches calendar order).
+3. **Legacy iteration** over `api.Contracts.Futures`, matching by
+   `code.startswith("TMF")` / `name` containing `微型台指` / `Mini TX`.
+   Kept as fallback for older SDKs where the futures container is
+   iterable.
+
+The operator may want to refine this logic for specific roll behaviour
+(e.g. always pick `TMFR2` near expiry to avoid last-day liquidity
+drop-off).
 
 ## Point value
 

@@ -9,6 +9,14 @@ ships under `templates/shioaji_live_adapter/`.
 > `FuturesOrderType`. `requirements.txt` pins `shioaji>=1.2.0,<2.0.0`
 > to track the current stable line and stay clear of a future 2.x
 > breaking-change boundary.
+>
+> **Phase 7.A-2 update**: `_resolve_tmf_contract` now prefers
+> attribute access on `api.Contracts.Futures.TMF` over iteration of
+> `api.Contracts.Futures`. Operator verification on shioaji 1.3.3
+> (paper session) showed iteration returns no items, while the
+> `TMF` sub-namespace is fully populated (`TMFR1`, `TMFR2`,
+> `TMF202605` ... `TMF202703`). Iteration is still tried as a final
+> fallback for older SDK shapes.
 
 The template is meant to be **copied out** of the main repo into the
 operator's own working directory (default
@@ -72,10 +80,17 @@ ticked before flipping to `false`.
 
 ## TMF (micro-TX) contract resolution
 
-The template enumerates `api.Contracts.Futures` and picks any
-contract whose `code` starts with `TMF` or whose `name` contains
-`微型台指` / `Mini TX`. Sort by nearest delivery date. The operator
-may need to refine for roll-over behaviour.
+Phase 7.A-2 resolution order:
+
+1. `api.Contracts.Futures.TMF.TMFR1` -- broker-maintained
+   front-month roll alias. Preferred.
+2. Nearest dated `TMFYYYYMM` under `api.Contracts.Futures.TMF`,
+   sorted lexically by `YYYYMM`.
+3. Legacy iteration over `api.Contracts.Futures` matching
+   `TMF*` / `微型台指` / `Mini TX`. Fallback only.
+
+The operator may need to refine for roll-over behaviour (e.g.
+prefer `TMFR2` near expiry).
 
 Point value: **NT$10 / point / contract** (hardcoded in
 `ai_swing.tmf_pnl.POINT_VALUE_TWD`).
