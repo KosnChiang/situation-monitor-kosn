@@ -1,0 +1,674 @@
+//@version=6
+// ============================================================
+// SATS + Boss Fibo Strategy v2 [NRP]
+//
+// v2 Changes from v1:
+// - P0: Fixed fractional qty bug (default_qty_value=100)
+// - P0: Added realistic commission & slippage
+// - P1: process_orders_on_close=false (next-bar open fill)
+// - P1: Removed ER triple-counting (legacy ER adaptation OFF by default)
+// - P2: tqiStruct now direction-aware
+// - P2: tqiMom replaced with acceleration-based metric
+// - P2: RSI filter tightened with tiered logic
+// - P2: Added minimum SL distance protection
+// - P3: Fibo touch tolerance ATR-based option
+// - P3: EMA smoothing alpha adapts to preset/timeframe
+// - P3: Added session filter, vol-spike filter, consecutive-loss pause
+// - P3: Dynamic Fibo Set selection option
+// ============================================================
+
+strategy(
+     title                 = "SATS + Boss Fibo Strategy v2 [NRP]",
+     shorttitle            = "SATS+BOSS FIBO v2",
+     overlay               = true,
+     max_lines_count       = 500,
+     max_labels_count      = 500,
+     max_boxes_count       = 50,
+     max_bars_back         = 5000,
+     initial_capital       = 1000000,
+     default_qty_type      = strategy.fixed,
+     default_qty_value     = 100,
+     pyramiding            = 0,
+     commission_type       = strategy.commission.cash_per_contract,
+     commission_value      = 0.5,
+     slippage              = 2,
+     process_orders_on_close = false,
+     calc_on_every_tick    = false)
+
+// ============================================================
+// Groups
+// ============================================================
+GRP_MAIN   = "01 SATS Trend Engine"
+GRP_TQI    = "02 Trend Quality Index"
+GRP_FIBO   = "03 Boss Fibo"
+GRP_RSI    = "04 RSI Filter"
+GRP_ENTRY  = "05 Entry Filter"
+GRP_RISK   = "06 Risk / Exit"
+GRP_VIS    = "07 Visual"
+GRP_ALERT  = "08 Webhook"
+
+// ============================================================
+// Inputs — SATS Trend Engine
+// ============================================================
+presetInput       = input.string("Auto", "Preset", options=["Auto", "Custom", "Scalping", "Default", "Swing"], group=GRP_MAIN)
+sourceInput       = input.source(close, "Source", group=GRP_MAIN)
+atrLenInput       = input.int(13, "ATR Length", minval=5, maxval=100, group=GRP_MAIN)
+baseMultInput     = input.float(2.0, "Base Band Width xATR", minval=0.5, maxval=5.0, step=0.1, group=GRP_MAIN)
+erLengthInput     = input.int(20, "Efficiency Window", minval=5, maxval=100, group=GRP_MAIN)
+atrBaselineLen    = input.int(100, "ATR Baseline Length", minval=20, maxval=500, group=GRP_MAIN)
+minBandMult       = input.float(1.2, "Min Band Multiplier Floor", minval=0.5, maxval=3.0, step=0.1, group=GRP_MAIN, tooltip="Prevents bands from becoming too tight in strong trends")
+
+// TQI
+useTqiInput        = input.bool(true, "Enable TQI", group=GRP_TQI)
+qualityStrength   = input.float(0.4, "Quality Influence", minval=0.0, maxval=1.0, step=0.05, group=GRP_TQI)
+qualityCurve       = input.float(1.5, "Quality Curve", minval=1.0, maxval=3.0, step=0.1, group=GRP_TQI)
+useAsymBands       = input.bool(true, "Asymmetric Bands", group=GRP_TQI)
+asymStrength       = input.float(0.5, "Asymmetry Strength", minval=0.0, maxval=1.0, step=0.05, group=GRP_TQI)
+useEffAtr          = input.bool(true, "Efficiency Weighted ATR", group=GRP_TQI)
+useCharFlip        = input.bool(true, "Character Flip", group=GRP_TQI)
+charFlipMinAge     = input.int(8, "Char Flip Min Trend Age", minval=1, maxval=50, group=GRP_TQI)
+charFlipHigh       = input.float(0.60, "Char Flip High TQI", minval=0.3, maxval=0.9, step=0.05, group=GRP_TQI)
+charFlipLow        = input.float(0.20, "Char Flip Low TQI", minval=0.0, maxval=0.5, step=0.05, group=GRP_TQI)
+
+wEr                = input.float(0.15, "TQI Weight Efficiency", minval=0.0, maxval=1.0, step=0.05, group=GRP_TQI, tooltip="v2: Reduced from 0.35 to avoid ER triple-counting")
+wVol               = input.float(0.25, "TQI Weight Volatility", minval=0.0, maxval=1.0, step=0.05, group=GRP_TQI)
+wStruct            = input.float(0.35, "TQI Weight Structure", minval=0.0, maxval=1.0, step=0.05, group=GRP_TQI, tooltip="v2: Increased — provides non-redundant directional info")
+wMom               = input.float(0.25, "TQI Weight Momentum", minval=0.0, maxval=1.0, step=0.05, group=GRP_TQI, tooltip="v2: Now acceleration-based instead of bar-alignment")
+tqiStructLen       = input.int(20, "Structure Window", minval=5, maxval=100, group=GRP_TQI)
+tqiMomLen          = input.int(10, "Momentum Window", minval=3, maxval=50, group=GRP_TQI)
+
+// ============================================================
+// Inputs — Boss Fibo
+// ============================================================
+autoOHLC           = input.bool(true, "Auto Previous Daily OHLC", group=GRP_FIBO)
+manualO            = input.float(40282, "Manual Prev Open", step=1, group=GRP_FIBO)
+manualH            = input.float(40468, "Manual Prev High", step=1, group=GRP_FIBO)
+manualL            = input.float(40005, "Manual Prev Low", step=1, group=GRP_FIBO)
+manualC            = input.float(40134, "Manual Prev Close", step=1, group=GRP_FIBO)
+setSel             = input.string("Auto", "Range Set", options=["Auto", "SetA", "SetB"], group=GRP_FIBO, tooltip="v2: Auto selects SetA for trend days (body>60% range), SetB otherwise")
+fiboMode           = input.string("KEY", "Fibo Display", options=["KEY", "ALL"], group=GRP_FIBO)
+tolMode            = input.string("ATR", "Touch Tolerance Mode", options=["Ticks", "ATR"], group=GRP_FIBO, tooltip="v2: ATR-based tolerance adapts to instrument volatility")
+tolTick            = input.int(6, "Touch Tolerance Ticks", minval=1, maxval=50, group=GRP_FIBO)
+tolAtrPct          = input.float(0.15, "Touch Tolerance ATR %", minval=0.01, maxval=0.50, step=0.01, group=GRP_FIBO)
+tickSizeInput      = input.float(1.0, "Tick Size", step=0.1, group=GRP_FIBO)
+lineExtendLeft     = input.int(300, "Line Extend Left Bars", minval=50, maxval=1000, group=GRP_FIBO)
+lineExtendRight    = input.int(30, "Line Extend Right Bars", minval=5, maxval=200, group=GRP_FIBO)
+showFiboLines      = input.bool(true, "Show Fibo Lines", group=GRP_FIBO)
+showFiboLabels     = input.bool(true, "Show Fibo Labels", group=GRP_FIBO)
+showFiboTable      = input.bool(true, "Show Fibo Data Table", group=GRP_FIBO)
+
+// ============================================================
+// Inputs — RSI / Entry Filters
+// ============================================================
+rsiLen             = input.int(14, "RSI Length", minval=2, maxval=50, group=GRP_RSI)
+rsiOB              = input.int(65, "RSI Overbought", minval=55, maxval=90, group=GRP_RSI, tooltip="v2: Tightened from 70")
+rsiOS              = input.int(35, "RSI Oversold", minval=10, maxval=45, group=GRP_RSI, tooltip="v2: Tightened from 30")
+useRsiFilter       = input.bool(true, "Use RSI Confirmation", group=GRP_RSI)
+rsiStrongOffset    = input.int(5, "RSI Strong Signal Offset", minval=0, maxval=20, group=GRP_RSI, tooltip="v2: RSI within OS+offset = strong signal")
+rsiMildOffset      = input.int(12, "RSI Mild Signal Offset", minval=0, maxval=25, group=GRP_RSI, tooltip="v2: RSI within OS+offset = mild signal (reduced qty)")
+useTieredRsi       = input.bool(true, "Use Tiered RSI Sizing", group=GRP_RSI, tooltip="v2: Strong RSI = full size, Mild = reduced size")
+mildQtyPct         = input.float(60, "Mild RSI Qty %", minval=10, maxval=100, step=5, group=GRP_RSI)
+
+entryMode          = input.string("SATS + Fibo + RSI", "Entry Mode", options=["SATS Only", "SATS + Fibo", "SATS + Fibo + RSI"], group=GRP_ENTRY)
+useFiboZoneFilter  = input.bool(true, "Require Fibo Touch Zone", group=GRP_ENTRY)
+useCandleConfirm   = input.bool(true, "Require Candle Body Confirm", group=GRP_ENTRY)
+useNoChopFilter    = input.bool(true, "Block Choppy Market", group=GRP_ENTRY)
+erChopFloor        = input.float(0.25, "ER Minimum", minval=0.0, maxval=1.0, step=0.05, group=GRP_ENTRY)
+tqiChopFloor       = input.float(0.30, "TQI Minimum", minval=0.0, maxval=1.0, step=0.05, group=GRP_ENTRY)
+cooldownBars       = input.int(5, "Signal Cooldown Bars", minval=0, maxval=50, group=GRP_ENTRY, tooltip="v2: Increased from 3")
+allowLong          = input.bool(true, "Allow Long", group=GRP_ENTRY)
+allowShort         = input.bool(true, "Allow Short", group=GRP_ENTRY)
+useSessionFilter   = input.bool(false, "Use Session Filter", group=GRP_ENTRY, tooltip="v2: Only trade during specified session")
+sessionSpec        = input.string("0845-1330", "Session Hours", group=GRP_ENTRY)
+sessionTZ          = input.string("Asia/Taipei", "Session Timezone", group=GRP_ENTRY)
+useVolSpikeFilter  = input.bool(true, "Block Vol-Spike Entry", group=GRP_ENTRY, tooltip="v2: Blocks entry when ATR > baseline * threshold")
+volSpikeThresh     = input.float(2.5, "Vol Spike ATR Threshold", minval=1.5, maxval=5.0, step=0.1, group=GRP_ENTRY)
+useConsecLossStop  = input.bool(true, "Pause After Consecutive Losses", group=GRP_ENTRY, tooltip="v2: Pauses trading after N consecutive losses")
+maxConsecLoss      = input.int(3, "Max Consecutive Losses", minval=1, maxval=10, group=GRP_ENTRY)
+
+// ============================================================
+// Inputs — Risk / Exit
+// ============================================================
+exitMode           = input.string("ATR R-Multiple", "Exit Mode", options=["ATR R-Multiple", "Fibo Step"], group=GRP_RISK)
+slMode             = input.string("ATR", "Stop Mode", options=["ATR", "Nearest Fibo"], group=GRP_RISK)
+slAtrMult          = input.float(1.5, "ATR Stop Mult", minval=0.3, maxval=10.0, step=0.1, group=GRP_RISK)
+minSlAtr           = input.float(0.5, "Min SL Distance (xATR)", minval=0.1, maxval=3.0, step=0.1, group=GRP_RISK, tooltip="v2: Prevents SL from being too close when using Fibo SL")
+tp1R               = input.float(1.0, "TP1 R", minval=0.2, maxval=10.0, step=0.1, group=GRP_RISK)
+tp2R               = input.float(2.0, "TP2 R", minval=0.2, maxval=10.0, step=0.1, group=GRP_RISK)
+tp3R               = input.float(3.0, "TP3 R", minval=0.2, maxval=20.0, step=0.1, group=GRP_RISK)
+tp1Pct             = input.float(40, "TP1 Qty %", minval=1, maxval=100, group=GRP_RISK, tooltip="v2: Front-loaded from 33")
+tp2Pct             = input.float(35, "TP2 Qty %", minval=1, maxval=100, group=GRP_RISK)
+tp3Pct             = input.float(25, "TP3 Qty %", minval=1, maxval=100, group=GRP_RISK)
+closeOnOpposite    = input.bool(true, "Close On Opposite SATS Flip", group=GRP_RISK)
+
+// ============================================================
+// Inputs — Visual / Webhook
+// ============================================================
+showST             = input.bool(true, "Show SATS Line", group=GRP_VIS)
+showSignals        = input.bool(true, "Show Strategy Signals", group=GRP_VIS)
+showBg             = input.bool(false, "Show Trend Background", group=GRP_VIS)
+showDash           = input.bool(true, "Show Dashboard", group=GRP_VIS)
+
+useWebhookJson     = input.bool(true, "Webhook JSON Alert", group=GRP_ALERT)
+strategyTag        = input.string("SATS_BOSS_FIBO_V2", "Strategy Tag", group=GRP_ALERT)
+
+// ============================================================
+// Utility Functions
+// ============================================================
+safeDiv(float num, float den, float fallback) =>
+    den != 0 and not na(num) and not na(den) ? num / den : fallback
+
+clamp(float v, float lo, float hi) =>
+    math.max(lo, math.min(hi, v))
+
+mapClamp(float v, float inLo, float inHi, float outLo, float outHi) =>
+    float t = clamp(safeDiv(v - inLo, inHi - inLo, 0.0), 0.0, 1.0)
+    outLo + t * (outHi - outLo)
+
+calcEfficiencyRatio(float src, int len) =>
+    float change = math.abs(src - src[len])
+    float volatility = math.sum(math.abs(src - src[1]), len)
+    safeDiv(change, volatility, 0.0)
+
+calcVolumeZ(int len) =>
+    float mean = ta.sma(volume, len)
+    float dev  = ta.stdev(volume, len)
+    safeDiv(volume - mean, dev, 0.0)
+
+// ============================================================
+// Preset Resolution
+// ============================================================
+int tfMinutes = int(timeframe.in_seconds(timeframe.period) / 60)
+string resolvedPreset = presetInput
+if presetInput == "Auto"
+    resolvedPreset := tfMinutes <= 5 ? "Scalping" : tfMinutes <= 240 ? "Default" : "Swing"
+
+int effectiveAtrLen = switch resolvedPreset
+    "Scalping" => 10
+    "Default"  => 14
+    "Swing"    => 21
+    "Custom"   => atrLenInput
+    => atrLenInput
+
+float effectiveBaseMult = switch resolvedPreset
+    "Scalping" => 1.8
+    "Default"  => 2.0
+    "Swing"    => 2.2
+    "Custom"   => baseMultInput
+    => baseMultInput
+
+int effectiveErLen = switch resolvedPreset
+    "Scalping" => 14
+    "Default"  => 20
+    "Swing"    => 30
+    "Custom"   => erLengthInput
+    => erLengthInput
+
+// v2: EMA smoothing alpha adapts to preset
+float emaAlpha = switch resolvedPreset
+    "Scalping" => 0.30
+    "Default"  => 0.20
+    "Swing"    => 0.10
+    "Custom"   => 0.15
+    => 0.15
+
+// ============================================================
+// SATS / TQI Calculations
+// ============================================================
+int warmupBars = math.max(50, math.max(effectiveAtrLen, math.max(effectiveErLen, math.max(tqiStructLen, tqiMomLen)))) + 10
+bool isWarmedUp = bar_index >= warmupBars
+
+float rawAtr = nz(ta.atr(effectiveAtrLen), 0.0)
+float atrBaseline = nz(ta.sma(rawAtr, atrBaselineLen), rawAtr)
+float volRatio = safeDiv(rawAtr, atrBaseline, 1.0)
+float erValue = calcEfficiencyRatio(close, effectiveErLen)
+float atrValue = useEffAtr ? rawAtr * (0.5 + 0.5 * erValue) : rawAtr
+
+// --- TQI Components ---
+float tqiEr = clamp(erValue, 0.0, 1.0)
+
+bool hasVolume = nz(volume, 0) > 0
+float volZ = hasVolume ? calcVolumeZ(20) : 0.0
+float tqiVol = hasVolume ? mapClamp(volZ, -1.0, 2.0, 0.0, 1.0) : mapClamp(volRatio, 0.6, 1.8, 0.0, 1.0)
+
+float structHi = ta.highest(high, tqiStructLen)
+float structLo = ta.lowest(low, tqiStructLen)
+float pricePos = safeDiv(close - structLo, structHi - structLo, 0.5)
+
+// v2: Direction-aware structure — rewards price at trend-aligned extreme
+var int stTrend = 1
+float tqiStruct = stTrend == 1 ? clamp(pricePos, 0.0, 1.0) : clamp(1.0 - pricePos, 0.0, 1.0)
+
+// v2: Acceleration-based momentum (replaces bar-alignment which was redundant with ER)
+float momEmaFast = ta.ema(close, tqiMomLen)
+float momEmaSlow = ta.ema(close, tqiMomLen * 2)
+float momNow  = momEmaFast - momEmaSlow
+float momPrev = momEmaFast[tqiMomLen] - momEmaSlow[tqiMomLen]
+float momAccel = safeDiv(momNow - momPrev, math.max(math.abs(momPrev), rawAtr * 0.01), 0.0)
+float tqiMom = clamp(mapClamp(momAccel, -1.0, 1.0, 0.0, 1.0), 0.0, 1.0)
+
+float tqiWeightSum = wEr + wVol + wStruct + wMom
+float tqi = useTqiInput ? clamp((tqiEr * wEr + tqiVol * wVol + tqiStruct * wStruct + tqiMom * wMom) / math.max(tqiWeightSum, 0.0001), 0.0, 1.0) : 0.5
+
+// v2: Legacy ER adaptation removed by default (was triple-counting)
+// Keeping the multiplier at 1.0 — TQI handles all adaptation
+float qualityDeviation = useTqiInput ? math.pow(1.0 - tqi, qualityCurve) : 0.5
+float tqiMult = 1.0 - qualityStrength + qualityStrength * (0.6 + 0.8 * qualityDeviation)
+float symMult = math.max(effectiveBaseMult * tqiMult, minBandMult)
+
+float activeMultRaw = symMult
+float passiveMultRaw = symMult
+if useTqiInput and useAsymBands
+    float asymTighten = 1.0 - asymStrength * tqi * 0.3
+    float asymWiden = 1.0 + asymStrength * tqi * 0.4
+    activeMultRaw := math.max(symMult * asymTighten, minBandMult)
+    passiveMultRaw := symMult * asymWiden
+
+// v2: EMA alpha adapts to preset
+var float activeMultSm = na
+var float passiveMultSm = na
+activeMultSm := na(activeMultSm[1]) ? activeMultRaw : activeMultSm[1] * (1.0 - emaAlpha) + activeMultRaw * emaAlpha
+passiveMultSm := na(passiveMultSm[1]) ? passiveMultRaw : passiveMultSm[1] * (1.0 - emaAlpha) + passiveMultRaw * emaAlpha
+
+var float lowerBand = na
+var float upperBand = na
+var int trendStartBar = 0
+
+int prevTrend = na(stTrend[1]) ? 1 : stTrend[1]
+float lowerMult = prevTrend == 1 ? activeMultSm : passiveMultSm
+float upperMult = prevTrend == 1 ? passiveMultSm : activeMultSm
+float lowerBandRaw = sourceInput - lowerMult * atrValue
+float upperBandRaw = sourceInput + upperMult * atrValue
+
+lowerBand := na(lowerBand[1]) ? lowerBandRaw : close[1] > lowerBand[1] ? math.max(lowerBandRaw, lowerBand[1]) : lowerBandRaw
+upperBand := na(upperBand[1]) ? upperBandRaw : close[1] < upperBand[1] ? math.min(upperBandRaw, upperBand[1]) : upperBandRaw
+
+bool priceFlipUp = prevTrend == -1 and close > upperBand[1]
+bool priceFlipDown = prevTrend == 1 and close < lowerBand[1]
+int trendAge = bar_index - trendStartBar
+float prevTqi = nz(tqi[1], 0.5)
+bool charFlipBase = useCharFlip and useTqiInput and prevTqi > charFlipHigh and tqi < charFlipLow and trendAge >= charFlipMinAge
+bool charFlipDown = charFlipBase and prevTrend == 1 and close < sourceInput
+bool charFlipUp = charFlipBase and prevTrend == -1 and close > sourceInput
+
+stTrend := na(stTrend[1]) ? 1 : (priceFlipUp or charFlipUp ? 1 : priceFlipDown or charFlipDown ? -1 : prevTrend)
+if stTrend != prevTrend
+    trendStartBar := bar_index
+
+float stLine = stTrend == 1 ? lowerBand : upperBand
+bool satsBuyFlip = stTrend == 1 and stTrend[1] == -1
+bool satsSellFlip = stTrend == -1 and stTrend[1] == 1
+
+// ============================================================
+// Boss Fibo Calculations
+// ============================================================
+[dO, dH, dL, dC] = request.security(syminfo.tickerid, "D", [open[1], high[1], low[1], close[1]], lookahead=barmerge.lookahead_on)
+float prevO = autoOHLC ? dO : manualO
+float prevH = autoOHLC ? dH : manualH
+float prevL = autoOHLC ? dL : manualL
+float prevC = autoOHLC ? dC : manualC
+
+// v2: Dynamic set selection based on previous day candle body ratio
+float prevRange = prevH - prevL
+float prevBody = math.abs(prevC - prevO)
+float bodyRatio = safeDiv(prevBody, prevRange, 0.5)
+string effectiveSet = setSel == "Auto" ? (bodyRatio > 0.6 ? "SetA" : "SetB") : setSel
+
+float bossBase = (prevO + prevH + prevL + prevC) / 4.0
+float dA = prevC - prevL
+float dB = prevH - prevL
+float bossD = effectiveSet == "SetA" ? dA : dB
+
+var array<float> ratioKeys = array.from(2.618, 1.618, 1.382, 1.236, 1.0, 0.786, 0.618, 0.5, 0.382, 0.236, 0.0, -0.236, -0.382, -0.5, -0.618, -0.786, -1.0, -1.272, -1.382, -1.618, -2.618)
+var array<string> ratioNames = array.from("2.618", "1.618", "1.382", "1.236", "1.000", "0.786", "0.618", "0.500", "0.382", "0.236", "BASE", "-0.236", "-0.382", "-0.500", "-0.618", "-0.786", "-1.000", "-1.272", "-1.382", "-1.618", "-2.618")
+var array<float> keyRatios = array.from(2.618, 1.618, 1.0, 0.618, 0.382, 0.236, 0.0, -0.236, -0.382, -0.618, -1.0, -1.618, -2.618)
+
+f_fiboPrice(float r) =>
+    bossBase + bossD * r
+
+f_fiboColor(float r) =>
+    r > 0 ? color.new(color.purple, 0) : r < 0 ? color.new(color.green, 0) : color.new(color.gray, 0)
+
+f_isKeyRatio(float r) =>
+    bool found = false
+    for i = 0 to array.size(keyRatios) - 1
+        if math.abs(array.get(keyRatios, i) - r) < 0.001
+            found := true
+    found
+
+f_visibleRatio(float r) =>
+    fiboMode == "ALL" or f_isKeyRatio(r)
+
+// v2: ATR-based tolerance option
+float tol = tolMode == "ATR" ? rawAtr * tolAtrPct : tolTick * tickSizeInput
+
+f_touchRatio(float r) =>
+    float p = f_fiboPrice(r)
+    low <= p + tol and high >= p - tol
+
+f_touchSupport() =>
+    bool touched = false
+    for i = 0 to array.size(ratioKeys) - 1
+        float r = array.get(ratioKeys, i)
+        if r <= 0.382 and f_touchRatio(r)
+            touched := true
+    touched
+
+f_touchResist() =>
+    bool touched = false
+    for i = 0 to array.size(ratioKeys) - 1
+        float r = array.get(ratioKeys, i)
+        if r >= 0.618 and f_touchRatio(r)
+            touched := true
+    touched
+
+f_nearestBelow(float px) =>
+    float best = na
+    float bestDist = 10e10
+    for i = 0 to array.size(ratioKeys) - 1
+        float p = f_fiboPrice(array.get(ratioKeys, i))
+        float dist = px - p
+        if dist > 0 and dist < bestDist
+            best := p
+            bestDist := dist
+    best
+
+f_nearestAbove(float px) =>
+    float best = na
+    float bestDist = 10e10
+    for i = 0 to array.size(ratioKeys) - 1
+        float p = f_fiboPrice(array.get(ratioKeys, i))
+        float dist = p - px
+        if dist > 0 and dist < bestDist
+            best := p
+            bestDist := dist
+    best
+
+f_stepTargetLong(float px, int step) =>
+    float t = na
+    int count = 0
+    for i = array.size(ratioKeys) - 1 to 0
+        float p = f_fiboPrice(array.get(ratioKeys, i))
+        if p > px
+            count += 1
+            if count == step
+                t := p
+    t
+
+f_stepTargetShort(float px, int step) =>
+    float t = na
+    int count = 0
+    for i = 0 to array.size(ratioKeys) - 1
+        float p = f_fiboPrice(array.get(ratioKeys, i))
+        if p < px
+            count += 1
+            if count == step
+                t := p
+    t
+
+// ============================================================
+// v2: Additional Filters
+// ============================================================
+
+// Session filter
+bool inSession = not useSessionFilter or not na(time(timeframe.period, sessionSpec, sessionTZ))
+
+// Vol-spike filter
+bool volSpikeOk = not useVolSpikeFilter or rawAtr <= atrBaseline * volSpikeThresh
+
+// Consecutive loss pause
+var int consecLosses = 0
+if strategy.closedtrades > 0
+    int lastIdx = strategy.closedtrades - 1
+    float lastPnl = strategy.closedtrades.profit(lastIdx)
+    if bar_index > 0 and strategy.closedtrades > strategy.closedtrades[1]
+        if lastPnl < 0
+            consecLosses += 1
+        else
+            consecLosses := 0
+bool notOnTilt = not useConsecLossStop or consecLosses < maxConsecLoss
+
+// ============================================================
+// Entry Logic
+// ============================================================
+float rsiVal = ta.rsi(close, rsiLen)
+bool candleBull = close > open
+bool candleBear = close < open
+bool fiboSupportTouch = f_touchSupport()
+bool fiboResistTouch = f_touchResist()
+
+// v2: Tiered RSI — strong vs mild
+bool rsiLongStrong = rsiVal <= rsiOS + rsiStrongOffset
+bool rsiLongMild   = rsiVal <= rsiOS + rsiMildOffset
+bool rsiShortStrong = rsiVal >= rsiOB - rsiStrongOffset
+bool rsiShortMild   = rsiVal >= rsiOB - rsiMildOffset
+
+bool rsiLongOk = not useRsiFilter or rsiLongMild
+bool rsiShortOk = not useRsiFilter or rsiShortMild
+bool bodyLongOk = not useCandleConfirm or candleBull
+bool bodyShortOk = not useCandleConfirm or candleBear
+bool chopOk = not useNoChopFilter or (erValue >= erChopFloor and tqi >= tqiChopFloor)
+
+bool modeFiboNeeded = entryMode == "SATS + Fibo" or entryMode == "SATS + Fibo + RSI"
+bool modeRsiNeeded = entryMode == "SATS + Fibo + RSI"
+
+bool longFiboOk = not useFiboZoneFilter or not modeFiboNeeded or fiboSupportTouch
+bool shortFiboOk = not useFiboZoneFilter or not modeFiboNeeded or fiboResistTouch
+bool longRsiOk2 = not modeRsiNeeded or rsiLongOk
+bool shortRsiOk2 = not modeRsiNeeded or rsiShortOk
+
+var int lastSignalBar = -999
+bool cooldownOk = bar_index - lastSignalBar >= cooldownBars
+
+// v2: Tiered qty calculation
+float baseQty = strategy.equity / close
+float longQtyMult = (useTieredRsi and modeRsiNeeded and rsiLongMild and not rsiLongStrong) ? mildQtyPct / 100.0 : 1.0
+float shortQtyMult = (useTieredRsi and modeRsiNeeded and rsiShortMild and not rsiShortStrong) ? mildQtyPct / 100.0 : 1.0
+
+bool longSignal = allowLong and isWarmedUp and barstate.isconfirmed and cooldownOk and satsBuyFlip and longFiboOk and longRsiOk2 and bodyLongOk and chopOk and inSession and volSpikeOk and notOnTilt
+bool shortSignal = allowShort and isWarmedUp and barstate.isconfirmed and cooldownOk and satsSellFlip and shortFiboOk and shortRsiOk2 and bodyShortOk and chopOk and inSession and volSpikeOk and notOnTilt
+
+if longSignal or shortSignal
+    lastSignalBar := bar_index
+
+// ============================================================
+// Exit Calculation
+// ============================================================
+float longAtrSL = close - rawAtr * slAtrMult
+float shortAtrSL = close + rawAtr * slAtrMult
+float minSlDist = rawAtr * minSlAtr
+
+// v2: Minimum SL distance protection for Fibo mode
+float longFibSL_raw = f_nearestBelow(close)
+float longFibSL = na(longFibSL_raw) ? longAtrSL : ((close - longFibSL_raw) < minSlDist ? close - minSlDist : longFibSL_raw)
+float shortFibSL_raw = f_nearestAbove(close)
+float shortFibSL = na(shortFibSL_raw) ? shortAtrSL : ((shortFibSL_raw - close) < minSlDist ? close + minSlDist : shortFibSL_raw)
+
+float longSL = slMode == "Nearest Fibo" ? longFibSL : longAtrSL
+float shortSL = slMode == "Nearest Fibo" ? shortFibSL : shortAtrSL
+float longRisk = math.max(close - longSL, tickSizeInput)
+float shortRisk = math.max(shortSL - close, tickSizeInput)
+
+float longTP1 = exitMode == "Fibo Step" ? nz(f_stepTargetLong(close, 1), close + longRisk * tp1R) : close + longRisk * tp1R
+float longTP2 = exitMode == "Fibo Step" ? nz(f_stepTargetLong(close, 2), close + longRisk * tp2R) : close + longRisk * tp2R
+float longTP3 = exitMode == "Fibo Step" ? nz(f_stepTargetLong(close, 3), close + longRisk * tp3R) : close + longRisk * tp3R
+float shortTP1 = exitMode == "Fibo Step" ? nz(f_stepTargetShort(close, 1), close - shortRisk * tp1R) : close - shortRisk * tp1R
+float shortTP2 = exitMode == "Fibo Step" ? nz(f_stepTargetShort(close, 2), close - shortRisk * tp2R) : close - shortRisk * tp2R
+float shortTP3 = exitMode == "Fibo Step" ? nz(f_stepTargetShort(close, 3), close - shortRisk * tp3R) : close - shortRisk * tp3R
+
+// v2: Use absolute qty for exits to avoid fractional-position bug
+var float activeSL = na
+var float activeTP1 = na
+var float activeTP2 = na
+var float activeTP3 = na
+var int activeDir = 0
+var float entryQty = na
+var float exitQty1 = na
+var float exitQty2 = na
+var float exitQty3 = na
+
+float defaultQty = 100.0
+
+if longSignal
+    float qty = math.round(defaultQty * longQtyMult)
+    activeSL := longSL
+    activeTP1 := longTP1
+    activeTP2 := longTP2
+    activeTP3 := longTP3
+    activeDir := 1
+    entryQty := qty
+    exitQty1 := math.floor(qty * tp1Pct / 100.0)
+    exitQty2 := math.floor(qty * tp2Pct / 100.0)
+    exitQty3 := qty - exitQty1 - exitQty2
+    strategy.entry("L", strategy.long, qty=qty, alert_message=useWebhookJson ? '{"tag":"' + strategyTag + '","signal":"BUY","symbol":"{{ticker}}","price":"{{close}}","tf":"{{interval}}","nrp":true}' : "BUY")
+
+if shortSignal
+    float qty = math.round(defaultQty * shortQtyMult)
+    activeSL := shortSL
+    activeTP1 := shortTP1
+    activeTP2 := shortTP2
+    activeTP3 := shortTP3
+    activeDir := -1
+    entryQty := qty
+    exitQty1 := math.floor(qty * tp1Pct / 100.0)
+    exitQty2 := math.floor(qty * tp2Pct / 100.0)
+    exitQty3 := qty - exitQty1 - exitQty2
+    strategy.entry("S", strategy.short, qty=qty, alert_message=useWebhookJson ? '{"tag":"' + strategyTag + '","signal":"SELL","symbol":"{{ticker}}","price":"{{close}}","tf":"{{interval}}","nrp":true}' : "SELL")
+
+// v2: Absolute qty exits — guarantees correct split regardless of position state
+if strategy.position_size > 0 and not na(exitQty1)
+    strategy.exit("L-TP1", "L", qty=exitQty1, stop=activeSL, limit=activeTP1)
+    strategy.exit("L-TP2", "L", qty=exitQty2, stop=activeSL, limit=activeTP2)
+    strategy.exit("L-TP3", "L", qty=exitQty3, stop=activeSL, limit=activeTP3)
+
+if strategy.position_size < 0 and not na(exitQty1)
+    strategy.exit("S-TP1", "S", qty=exitQty1, stop=activeSL, limit=activeTP1)
+    strategy.exit("S-TP2", "S", qty=exitQty2, stop=activeSL, limit=activeTP2)
+    strategy.exit("S-TP3", "S", qty=exitQty3, stop=activeSL, limit=activeTP3)
+
+if closeOnOpposite and strategy.position_size > 0 and satsSellFlip and barstate.isconfirmed
+    strategy.close("L", comment="Opposite Flip", alert_message=useWebhookJson ? '{"tag":"' + strategyTag + '","signal":"CLOSE_LONG","symbol":"{{ticker}}","price":"{{close}}","tf":"{{interval}}","nrp":true}' : "CLOSE_LONG")
+
+if closeOnOpposite and strategy.position_size < 0 and satsBuyFlip and barstate.isconfirmed
+    strategy.close("S", comment="Opposite Flip", alert_message=useWebhookJson ? '{"tag":"' + strategyTag + '","signal":"CLOSE_SHORT","symbol":"{{ticker}}","price":"{{close}}","tf":"{{interval}}","nrp":true}' : "CLOSE_SHORT")
+
+if strategy.position_size == 0 and strategy.position_size[1] != 0
+    activeSL := na
+    activeTP1 := na
+    activeTP2 := na
+    activeTP3 := na
+    activeDir := 0
+    entryQty := na
+    exitQty1 := na
+    exitQty2 := na
+    exitQty3 := na
+
+// ============================================================
+// Visuals — SATS
+// ============================================================
+color bullCol = color.new(#00E676, 0)
+color bearCol = color.new(#FF5252, 0)
+color stCol = stTrend == 1 ? bullCol : bearCol
+plot(showST and isWarmedUp ? stLine : na, "SATS Adaptive SuperTrend", color=stCol, linewidth=2)
+bgcolor(showBg and isWarmedUp ? (stTrend == 1 ? color.new(bullCol, 92) : color.new(bearCol, 92)) : na)
+
+// v2: Signal labels show tier info
+string longLabel = useTieredRsi and modeRsiNeeded and rsiLongMild and not rsiLongStrong ? "BUY\nMILD" : "BUY\nSATS+FIBO"
+string shortLabel = useTieredRsi and modeRsiNeeded and rsiShortMild and not rsiShortStrong ? "SELL\nMILD" : "SELL\nSATS+FIBO"
+plotshape(showSignals and longSignal, title="BUY", style=shape.labelup, text=longLabel, location=location.belowbar, color=bullCol, textcolor=color.white, size=size.small)
+plotshape(showSignals and shortSignal, title="SELL", style=shape.labeldown, text=shortLabel, location=location.abovebar, color=bearCol, textcolor=color.white, size=size.small)
+
+plot(strategy.position_size != 0 ? activeSL : na, "Active SL", color=color.new(color.red, 0), linewidth=2, style=plot.style_linebr)
+plot(strategy.position_size != 0 ? activeTP1 : na, "Active TP1", color=color.new(color.lime, 0), linewidth=1, style=plot.style_linebr)
+plot(strategy.position_size != 0 ? activeTP2 : na, "Active TP2", color=color.new(color.lime, 0), linewidth=1, style=plot.style_linebr)
+plot(strategy.position_size != 0 ? activeTP3 : na, "Active TP3", color=color.new(color.lime, 0), linewidth=2, style=plot.style_linebr)
+
+// ============================================================
+// Visuals — Boss Fibo Lines / Labels
+// ============================================================
+var array<line> fibLines = array.new_line()
+var array<label> fibLabels = array.new_label()
+
+if barstate.islast and showFiboLines
+    while array.size(fibLines) > 0
+        line.delete(array.pop(fibLines))
+    while array.size(fibLabels) > 0
+        label.delete(array.pop(fibLabels))
+
+    for i = 0 to array.size(ratioKeys) - 1
+        float r = array.get(ratioKeys, i)
+        if f_visibleRatio(r)
+            float p = f_fiboPrice(r)
+            color c = f_fiboColor(r)
+            line_style = r == 0.0 ? line.style_dashed : line.style_solid
+            int w = (math.abs(r) == 1.0 or math.abs(r) == 1.618 or math.abs(r) == 2.618 or r == 0.0) ? 2 : 1
+            line ln = line.new(bar_index - lineExtendLeft, p, bar_index + lineExtendRight, p, xloc=xloc.bar_index, color=c, style=line_style, width=w)
+            array.push(fibLines, ln)
+            if showFiboLabels
+                string nm = array.get(ratioNames, i)
+                label lb = label.new(bar_index + 2, p, nm + "  " + str.tostring(p, format.mintick), xloc=xloc.bar_index, yloc=yloc.price, style=label.style_label_left, color=color.new(c, 70), textcolor=color.white, size=size.small)
+                array.push(fibLabels, lb)
+
+// ============================================================
+// Dashboard
+// ============================================================
+var table dash = table.new(position.top_right, 2, 16, border_width=1, border_color=color.new(color.gray, 60))
+
+if barstate.islast and showDash
+    table.cell(dash, 0, 0, "SATS+BOSS", text_color=color.white, bgcolor=color.new(color.blue, 0), text_size=size.small)
+    table.cell(dash, 1, 0, "v2 NRP", text_color=color.white, bgcolor=color.new(color.blue, 0), text_size=size.small)
+    table.cell(dash, 0, 1, "Trend", text_color=color.gray, text_size=size.small)
+    table.cell(dash, 1, 1, stTrend == 1 ? "Bull" : "Bear", text_color=stTrend == 1 ? bullCol : bearCol, text_size=size.small)
+    table.cell(dash, 0, 2, "TQI", text_color=color.gray, text_size=size.small)
+    table.cell(dash, 1, 2, str.tostring(tqi, "#.00"), text_color=tqi >= tqiChopFloor ? bullCol : bearCol, text_size=size.small)
+    table.cell(dash, 0, 3, "ER", text_color=color.gray, text_size=size.small)
+    table.cell(dash, 1, 3, str.tostring(erValue, "#.00"), text_color=erValue >= erChopFloor ? bullCol : bearCol, text_size=size.small)
+    table.cell(dash, 0, 4, "RSI", text_color=color.gray, text_size=size.small)
+    table.cell(dash, 1, 4, str.tostring(rsiVal, "#.0"), text_color=color.white, text_size=size.small)
+    table.cell(dash, 0, 5, "Fibo Base", text_color=color.gray, text_size=size.small)
+    table.cell(dash, 1, 5, str.tostring(bossBase, "#"), text_color=color.white, text_size=size.small)
+    table.cell(dash, 0, 6, "Range", text_color=color.gray, text_size=size.small)
+    table.cell(dash, 1, 6, effectiveSet + " d=" + str.tostring(bossD, "#"), text_color=color.white, text_size=size.small)
+    table.cell(dash, 0, 7, "Touch S/R", text_color=color.gray, text_size=size.small)
+    table.cell(dash, 1, 7, (fiboSupportTouch ? "S " : "") + (fiboResistTouch ? "R" : ""), text_color=color.yellow, text_size=size.small)
+    table.cell(dash, 0, 8, "Entry", text_color=color.gray, text_size=size.small)
+    table.cell(dash, 1, 8, entryMode, text_color=color.white, text_size=size.small)
+    table.cell(dash, 0, 9, "Exit", text_color=color.gray, text_size=size.small)
+    table.cell(dash, 1, 9, exitMode, text_color=color.white, text_size=size.small)
+    table.cell(dash, 0, 10, "VolSpike", text_color=color.gray, text_size=size.small)
+    table.cell(dash, 1, 10, volSpikeOk ? "OK" : "BLOCKED", text_color=volSpikeOk ? bullCol : bearCol, text_size=size.small)
+    table.cell(dash, 0, 11, "ConsecLoss", text_color=color.gray, text_size=size.small)
+    table.cell(dash, 1, 11, str.tostring(consecLosses) + "/" + str.tostring(maxConsecLoss), text_color=notOnTilt ? bullCol : bearCol, text_size=size.small)
+    table.cell(dash, 0, 12, "Status", text_color=color.gray, text_size=size.small)
+    table.cell(dash, 1, 12, isWarmedUp ? (inSession ? "Ready" : "Out of Session") : "Warmup", text_color=isWarmedUp and inSession ? bullCol : color.yellow, text_size=size.small)
+    table.cell(dash, 0, 13, "Prev OHLC", text_color=color.gray, text_size=size.small)
+    table.cell(dash, 1, 13, "O" + str.tostring(prevO, "#") + " H" + str.tostring(prevH, "#") + " L" + str.tostring(prevL, "#") + " C" + str.tostring(prevC, "#"), text_color=color.white, text_size=size.small)
+    table.cell(dash, 0, 14, "Open PnL", text_color=color.gray, text_size=size.small)
+    table.cell(dash, 1, 14, str.tostring(strategy.openprofit, "#.##"), text_color=strategy.openprofit >= 0 ? bullCol : bearCol, text_size=size.small)
+    table.cell(dash, 0, 15, "Net Profit", text_color=color.gray, text_size=size.small)
+    table.cell(dash, 1, 15, str.tostring(strategy.netprofit, "#.##"), text_color=strategy.netprofit >= 0 ? bullCol : bearCol, text_size=size.small)
+
+// Fibo price table
+var table fibTbl = table.new(position.bottom_right, 3, 15, border_width=1, border_color=color.new(color.gray, 60))
+if barstate.islast and showFiboTable
+    table.cell(fibTbl, 0, 0, "Ratio", text_color=color.white, bgcolor=color.new(color.gray, 30), text_size=size.small)
+    table.cell(fibTbl, 1, 0, "Price", text_color=color.white, bgcolor=color.new(color.gray, 30), text_size=size.small)
+    table.cell(fibTbl, 2, 0, "Dist", text_color=color.white, bgcolor=color.new(color.gray, 30), text_size=size.small)
+    int row = 1
+    for i = 0 to array.size(ratioKeys) - 1
+        float r = array.get(ratioKeys, i)
+        if f_isKeyRatio(r) and row < 15
+            float p = f_fiboPrice(r)
+            float dist = close - p
+            color bg = math.abs(dist) <= tol * 2 ? color.new(color.yellow, 55) : color.new(f_fiboColor(r), 85)
+            table.cell(fibTbl, 0, row, array.get(ratioNames, i), text_color=color.white, bgcolor=bg, text_size=size.small)
+            table.cell(fibTbl, 1, row, str.tostring(p, "#"), text_color=color.white, bgcolor=bg, text_size=size.small)
+            table.cell(fibTbl, 2, row, (dist >= 0 ? "+" : "") + str.tostring(dist, "#"), text_color=color.white, bgcolor=bg, text_size=size.small)
+            row += 1
+
+// ============================================================
+// Alerts
+// ============================================================
+alertcondition(longSignal, title="SATS+BOSS BUY", message="SATS+BOSS FIBO v2 BUY confirmed")
+alertcondition(shortSignal, title="SATS+BOSS SELL", message="SATS+BOSS FIBO v2 SELL confirmed")
+alertcondition(fiboSupportTouch or fiboResistTouch, title="Boss Fibo Touch", message="Price touched Boss Fibo level")
